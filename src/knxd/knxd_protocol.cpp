@@ -189,4 +189,21 @@ bool parse_eibd_message(const std::vector<uint8_t>& raw, uint16_t& out_type,
   return true;
 }
 
+std::optional<std::vector<uint8_t>> try_extract_message(std::vector<uint8_t>& buffer) {
+  if (buffer.size() < 2)
+    return std::nullopt;  // need at least the 2-byte length header
+
+  uint16_t payload_len = static_cast<uint16_t>((buffer[0] << 8) | buffer[1]);
+  size_t total_needed = 2 + static_cast<size_t>(payload_len);
+
+  if (buffer.size() < total_needed)
+    return std::nullopt;  // incomplete message — need more data
+
+  // Extract complete message
+  std::vector<uint8_t> msg(buffer.begin(),
+                           buffer.begin() + static_cast<ptrdiff_t>(total_needed));
+  buffer.erase(buffer.begin(), buffer.begin() + static_cast<ptrdiff_t>(total_needed));
+  return msg;
+}
+
 }  // namespace cvknxd

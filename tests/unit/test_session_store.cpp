@@ -94,3 +94,46 @@ TEST(SessionStoreTest, Count) {
   store.create_session(false);
   EXPECT_EQ(store.count(), 2);
 }
+
+TEST(SessionStoreTest, ExpiredSessionsCleanedOnIsValid) {
+  // Use a very short TTL so sessions expire quickly
+  SessionStore store(0);  // 0-second TTL — sessions expire immediately
+
+  std::string id = store.create_session(false);
+  EXPECT_EQ(store.count(), 1);
+
+  // is_valid should detect expiration AND clean up
+  EXPECT_FALSE(store.is_valid(id));
+  EXPECT_EQ(store.count(), 0);  // expired session removed
+}
+
+TEST(SessionStoreTest, MaxSessionsEnforced) {
+  SessionStore store(1800, 2);  // 30-min TTL, max 2 sessions
+
+  auto id1 = store.create_session(false);
+  auto id2 = store.create_session(false);
+  EXPECT_EQ(store.count(), 2);
+  EXPECT_TRUE(store.is_valid(id1));
+  EXPECT_TRUE(store.is_valid(id2));
+
+  // Third session should evict the oldest
+  auto id3 = store.create_session(false);
+  EXPECT_EQ(store.count(), 2);
+  EXPECT_TRUE(store.is_valid(id3));
+  EXPECT_TRUE(store.is_valid(id2));  // newer session preserved
+  EXPECT_FALSE(store.is_valid(id1));  // oldest evicted
+}
+
+TEST(SessionStoreTest, MaxSessionsPreservesAnonymous) {
+  SessionStore store(1800, 1);  // max 1 session
+
+  auto id1 = store.create_session(false);
+  EXPECT_EQ(store.count(), 1);
+
+  // Anonymous session doesn't count toward limit
+  auto anon = store.create_session(true);
+  EXPECT_EQ(anon, "0");
+  EXPECT_EQ(store.count(), 1);  // anonymous not stored in map
+  EXPECT_TRUE(store.is_valid("0"));
+  EXPECT_TRUE(store.is_valid(id1));
+}

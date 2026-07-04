@@ -90,3 +90,48 @@ TEST(QueryStringTest, ValueWithEquals) {
   ASSERT_TRUE(val.has_value());
   EXPECT_EQ(*val, "foo=bar");
 }
+
+TEST(QueryStringTest, ParameterCountLimit) {
+  // Build a query string with many unique parameters
+  std::string q;
+  for (int i = 0; i < 150; ++i) {
+    if (i > 0) q += '&';
+    q += "p" + std::to_string(i) + "=v" + std::to_string(i);
+  }
+  QueryString qs(q);
+  // Should not exceed the limit — stops at kMaxQueryParams (100)
+  EXPECT_LE(qs.size(), 100);
+  // First parameter should still be present
+  EXPECT_TRUE(qs.has("p0"));
+  EXPECT_EQ(*qs.get("p0"), "v0");
+  // Parameter beyond limit should be ignored
+  EXPECT_FALSE(qs.has("p140"));
+}
+
+TEST(QueryStringTest, ValueCountPerKeyLimit) {
+  // Many values for a single key
+  std::string q;
+  for (int i = 0; i < 150; ++i) {
+    if (i > 0) q += '&';
+    q += "a=v" + std::to_string(i);
+  }
+  QueryString qs(q);
+  auto all = qs.get_all("a");
+  // Should cap at kMaxValuesPerKey (128)
+  EXPECT_LE(all.size(), 128);
+  EXPECT_EQ(all[0], "v0");
+}
+
+TEST(QueryStringTest, TotalParamCountLimit) {
+  // Many identical params — tests the total pair count limit
+  std::string q;
+  for (int i = 0; i < 200; ++i) {
+    if (i > 0) q += '&';
+    q += "a=v" + std::to_string(i);
+  }
+  QueryString qs(q);
+  // Should still parse without crash, capping at kMaxTotalPairs (200)
+  EXPECT_EQ(qs.size(), 1);  // single key "a"
+  auto all = qs.get_all("a");
+  EXPECT_LE(all.size(), 128);  // capped per key
+}

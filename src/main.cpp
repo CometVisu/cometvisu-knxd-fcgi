@@ -13,7 +13,9 @@
 // You should have received a copy of the GNU General Public License
 // along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
+#include <charconv>
 #include <cstdlib>
+#include <cstring>
 #include <iostream>
 #include <string>
 
@@ -24,10 +26,28 @@
 
 namespace {
 
+/// Maximum long-poll timeout in seconds. Prevents DoS via huge timeout values.
+inline constexpr int kMaxLongpollTimeoutSec = 3600;  // 1 hour
+
 /// Read an environment variable with a default value.
 const char* get_env_default(const char* name, const char* default_value) {
   const char* val = getenv(name);
   return (val != nullptr && val[0] != '\0') ? val : default_value;
+}
+
+/// Parse an integer from an environment variable safely using std::from_chars.
+/// Returns the parsed value clamped to [min_val, max_val], or default_val on error.
+int parse_env_int(const char* name, int default_val, int min_val, int max_val) {
+  const char* val = getenv(name);
+  if (val == nullptr || val[0] == '\0')
+    return default_val;
+  int result = 0;
+  auto [ptr, ec] = std::from_chars(val, val + std::strlen(val), result);
+  if (ec != std::errc{} || result < min_val)
+    return default_val;
+  if (result > max_val)
+    return max_val;
+  return result;
 }
 
 }  // namespace
@@ -36,13 +56,14 @@ int main() {
   using namespace cvknxd;
 
   // ---- Configuration ----
+  // Environment variables are inherited from the FCGI-spawning web server.
+  // This is safe because:
+  //   - The web server (e.g. Apache, nginx, lighttpd) is the trusted parent process.
+  //   - The knxd socket is a local Unix socket — redirection only affects the local machine.
+  //   - An attacker who can manipulate the web server's environment already has
+  //     sufficient access to compromise the system directly.
   const char* knxd_socket = get_env_default("KNXD_SOCKET", "/run/knx");
-  int longpoll_timeout = 60;
-  if (const char* lp = getenv("LONGPOLL_TIMEOUT_SEC")) {
-    longpoll_timeout = std::atoi(lp);
-    if (longpoll_timeout <= 0)
-      longpoll_timeout = 60;
-  }
+  int longpoll_timeout = parse_env_int("LONGPOLL_TIMEOUT_SEC", 60, 1, kMaxLongpollTimeoutSec);
 
   // ---- Initialize components ----
   KnxdClient knxd;

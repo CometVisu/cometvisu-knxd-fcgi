@@ -112,4 +112,17 @@ inline constexpr uint16_t CACHE_READ_NOWAIT = EIB_CACHE_READ_NOWAIT;
 [[nodiscard]] bool parse_eibd_message(const std::vector<uint8_t>& raw, uint16_t& out_type,
                                       std::vector<uint8_t>& out_data);
 
+/// Maximum size of the internal read buffer in bytes (1 MB).
+/// Prevents unbounded memory growth from unconsumed telegrams.
+inline constexpr size_t kMaxReadBufferSize = 1 * 1024 * 1024;
+
+/// Try to extract a complete eibd message from an accumulated read buffer.
+/// If a complete message is found (based on the 2-byte length prefix),
+/// it is removed from the buffer and returned.
+/// @param buffer The accumulated read buffer (modified in place).
+/// @return Complete message bytes (including 2-byte length header), or std::nullopt
+///         if no complete message is available yet.
+[[nodiscard]] std::optional<std::vector<uint8_t>> try_extract_message(
+    std::vector<uint8_t>& buffer);
+
 }  // namespace cvknxd

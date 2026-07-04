@@ -35,6 +35,11 @@ public:
   /// Disconnect from knxd.
   virtual void disconnect() = 0;
 
+  /// Attempt to reconnect after a disconnect, using the last known socket path
+  /// and group socket settings. Returns true if reconnection and group socket
+  /// re-opening succeeded.
+  [[nodiscard]] virtual bool reconnect() = 0;
+
   /// Check if connected.
   [[nodiscard]] virtual bool is_connected() const = 0;
 
@@ -86,6 +91,7 @@ public:
 
   [[nodiscard]] bool connect(std::string_view socket_path) override;
   void disconnect() override;
+  [[nodiscard]] bool reconnect() override;
   [[nodiscard]] bool is_connected() const override;
   [[nodiscard]] bool open_group_socket(bool write_only) override;
   [[nodiscard]] bool send_group_packet(uint16_t group_addr,

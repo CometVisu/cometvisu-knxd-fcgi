@@ -19,6 +19,16 @@
 
 namespace cvknxd {
 
+/// Maximum number of unique parameter keys accepted in a single query string.
+/// Prevents memory exhaustion from maliciously crafted requests.
+inline constexpr size_t kMaxQueryParams = 100;
+
+/// Maximum number of values per single key.
+inline constexpr size_t kMaxValuesPerKey = 128;
+
+/// Absolute maximum total key=value pairs parsed from a query string.
+inline constexpr size_t kMaxTotalPairs = 200;
+
 namespace {
 
 // Simple URL percent-decoder
@@ -60,7 +70,13 @@ QueryString::QueryString(std::string_view raw) {
     return;
 
   size_t pos = 0;
+  size_t total_pairs = 0;
   while (pos < raw.size()) {
+    // Enforce total pair limit
+    if (total_pairs >= kMaxTotalPairs)
+      break;
+    ++total_pairs;
+
     // Find key=value pair
     size_t eq = raw.find('=', pos);
     size_t amp = raw.find('&', pos);
@@ -75,7 +91,23 @@ QueryString::QueryString(std::string_view raw) {
     size_t val_end = (amp == std::string_view::npos) ? raw.size() : amp;
     std::string value{url_decode(raw.substr(eq + 1, val_end - eq - 1))};
 
-    params_[key].push_back(std::move(value));
+    // Enforce max unique keys and max values per key
+    auto it = params_.find(key);
+    if (it != params_.end()) {
+      // Existing key — enforce max values per key
+      if (it->second.size() >= kMaxValuesPerKey) {
+        pos = (amp == std::string_view::npos) ? raw.size() : amp + 1;
+        continue;  // skip this value, key is full
+      }
+      it->second.push_back(std::move(value));
+    } else {
+      // New key — enforce max unique keys
+      if (params_.size() >= kMaxQueryParams) {
+        pos = (amp == std::string_view::npos) ? raw.size() : amp + 1;
+        continue;  // skip this key, map is full
+      }
+      params_[key].push_back(std::move(value));
+    }
     pos = (amp == std::string_view::npos) ? raw.size() : amp + 1;
   }
 }

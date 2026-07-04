@@ -17,11 +17,16 @@
 
 #include <fcgi_stdio.h>
 
+#include <charconv>
 #include <cstdlib>
 #include <cstring>
 #include <iostream>
 
 namespace cvknxd {
+
+/// Maximum allowed request body size (64 KB).
+/// Prevents OOM from a malicious CONTENT_LENGTH.
+inline constexpr int kMaxContentLength = 64 * 1024;
 
 FcgiServer::FcgiServer() = default;
 
@@ -65,19 +70,33 @@ FcgiRequest FcgiServer::read_request() {
   if (req.request_method == "POST" || req.request_method == "PUT") {
     const char* content_length_str = getenv("CONTENT_LENGTH");
     if (content_length_str[0] != '\0') {
-      int content_length = std::atoi(content_length_str);
-      if (content_length > 0) {
-        req.content.resize(static_cast<size_t>(content_length));
-        // Read from FCGI stdin
-        size_t total = 0;
-        while (total < static_cast<size_t>(content_length)) {
-          int n = FCGI_fread(req.content.data() + total, 1,
-                             static_cast<int>(req.content.size() - total), stdin);
-          if (n <= 0)
-            break;
-          total += static_cast<size_t>(n);
-        }
+      int content_length = 0;
+      auto [ptr, ec] =
+          std::from_chars(content_length_str,
+                          content_length_str + std::strlen(content_length_str),
+                          content_length);
+      if (ec != std::errc{} || content_length <= 0) {
+        // Invalid or non-positive content length — skip body
+        return req;
       }
+      // Cap at maximum to prevent OOM on constrained systems
+      if (content_length > kMaxContentLength) {
+        std::cerr << "[WARN] CONTENT_LENGTH " << content_length
+                  << " exceeds maximum " << kMaxContentLength << ", truncating\n";
+        content_length = kMaxContentLength;
+      }
+      req.content.resize(static_cast<size_t>(content_length));
+      // Read from FCGI stdin
+      size_t total = 0;
+      while (total < static_cast<size_t>(content_length)) {
+        int n = FCGI_fread(req.content.data() + total, 1,
+                           static_cast<int>(req.content.size() - total), stdin);
+        if (n <= 0)
+          break;
+        total += static_cast<size_t>(n);
+      }
+      // Shrink to actual bytes read (in case of early EOF)
+      req.content.resize(total);
     }
   }
 

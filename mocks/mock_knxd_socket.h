@@ -35,6 +35,7 @@ public:
 
   [[nodiscard]] bool connect(std::string_view socket_path) override;
   void disconnect() override;
+  [[nodiscard]] bool reconnect() override;
   [[nodiscard]] bool is_connected() const override;
   [[nodiscard]] bool open_group_socket(bool write_only) override;
   [[nodiscard]] bool send_group_packet(uint16_t group_addr,
@@ -71,6 +72,7 @@ private:
   bool connected_ = false;
   bool group_socket_open_ = false;
   bool connection_success_ = true;
+  std::string last_socket_path_;
   std::unordered_map<uint16_t, std::vector<uint8_t>> cached_values_;
   std::queue<std::pair<uint16_t, std::vector<uint8_t>>> telegram_queue_;
   std::vector<SentPacket> sent_packets_;

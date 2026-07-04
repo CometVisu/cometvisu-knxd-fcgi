@@ -19,7 +19,8 @@
 
 namespace cvknxd {
 
-SessionStore::SessionStore(int session_ttl_sec) : session_ttl_sec_(session_ttl_sec) {}
+SessionStore::SessionStore(int session_ttl_sec, size_t max_sessions)
+    : session_ttl_sec_(session_ttl_sec), max_sessions_(max_sessions) {}
 
 std::string SessionStore::create_session(bool anonymous) {
   if (anonymous)
@@ -28,12 +29,23 @@ std::string SessionStore::create_session(bool anonymous) {
   // Clean up expired sessions before creating a new one
   cleanup_expired();
 
+  // Enforce maximum session count: evict oldest if at limit
+  if (!sessions_.empty() && sessions_.size() >= max_sessions_) {
+    auto oldest = sessions_.begin();
+    for (auto it = sessions_.begin(); it != sessions_.end(); ++it) {
+      if (it->second.created < oldest->second.created) {
+        oldest = it;
+      }
+    }
+    sessions_.erase(oldest);
+  }
+
   std::string id = generate_id();
   sessions_[id] = Session{id, std::chrono::steady_clock::now()};
   return id;
 }
 
-bool SessionStore::is_valid(std::string_view session_id) const {
+bool SessionStore::is_valid(std::string_view session_id) {
   if (session_id == "0")
     return true;  // anonymous always valid
   std::string key{session_id};
@@ -42,8 +54,15 @@ bool SessionStore::is_valid(std::string_view session_id) const {
     return false;
 
   // Check expiration
-  auto age = std::chrono::steady_clock::now() - it->second.created;
-  return std::chrono::duration_cast<std::chrono::seconds>(age).count() < session_ttl_sec_;
+  auto age = std::chrono::duration_cast<std::chrono::seconds>(
+                 std::chrono::steady_clock::now() - it->second.created)
+                 .count();
+  if (age >= session_ttl_sec_) {
+    // Expired — remove from store and return false
+    sessions_.erase(it);
+    return false;
+  }
+  return true;
 }
 
 void SessionStore::remove(std::string_view session_id) {

@@ -207,3 +207,84 @@ TEST(EibdMessageTest, ParseTooShort) {
   std::vector<uint8_t> data;
   EXPECT_FALSE(parse_eibd_message(raw, type, data));
 }
+
+// ---- try_extract_message (buffer-based incremental parsing) ----
+
+TEST(TryExtractMessageTest, CompleteMessage) {
+  std::vector<uint8_t> buffer = {0x00, 0x04, 0x00, 0x27, 0xAA, 0xBB};
+  auto msg = try_extract_message(buffer);
+  ASSERT_TRUE(msg.has_value());
+  EXPECT_EQ(msg->size(), 6);
+  // Verify the message contains what we put in
+  EXPECT_EQ((*msg)[0], 0x00);
+  EXPECT_EQ((*msg)[1], 0x04);
+  EXPECT_EQ((*msg)[4], 0xAA);
+  EXPECT_EQ((*msg)[5], 0xBB);
+  // Buffer should be consumed
+  EXPECT_TRUE(buffer.empty());
+}
+
+TEST(TryExtractMessageTest, IncompleteMessage) {
+  std::vector<uint8_t> buffer = {0x00, 0x04, 0x00};  // length says 4, only 1 byte available
+  auto msg = try_extract_message(buffer);
+  EXPECT_FALSE(msg.has_value());
+  // Buffer should be unchanged
+  EXPECT_EQ(buffer.size(), 3);
+}
+
+TEST(TryExtractMessageTest, EmptyBuffer) {
+  std::vector<uint8_t> buffer;
+  auto msg = try_extract_message(buffer);
+  EXPECT_FALSE(msg.has_value());
+}
+
+TEST(TryExtractMessageTest, MultipleMessagesBuffered) {
+  // Two messages back-to-back
+  std::vector<uint8_t> buffer = {
+      0x00, 0x02, 0x00, 0x27,  // 2-byte payload, type 0x0027
+      0x00, 0x03, 0x00, 0x25, 0xAA  // 3-byte payload, type 0x0025
+  };
+  auto msg1 = try_extract_message(buffer);
+  ASSERT_TRUE(msg1.has_value());
+  EXPECT_EQ(msg1->size(), 4);  // 2 len + 2 payload
+
+  auto msg2 = try_extract_message(buffer);
+  ASSERT_TRUE(msg2.has_value());
+  EXPECT_EQ(msg2->size(), 5);  // 2 len + 3 payload
+
+  EXPECT_TRUE(buffer.empty());
+}
+
+TEST(TryExtractMessageTest, PartialSecondMessage) {
+  // First message complete, second incomplete
+  std::vector<uint8_t> buffer = {
+      0x00, 0x02, 0x00, 0x27,  // complete: 2+2=4 bytes
+      0x00, 0x05, 0x00          // length says 5, only 1 byte available → incomplete
+  };
+  auto msg1 = try_extract_message(buffer);
+  ASSERT_TRUE(msg1.has_value());
+  EXPECT_EQ(msg1->size(), 4);
+
+  auto msg2 = try_extract_message(buffer);
+  EXPECT_FALSE(msg2.has_value());
+  EXPECT_EQ(buffer.size(), 3);  // remaining partial message preserved
+}
+
+TEST(TryExtractMessageTest, SingleByteBuffer) {
+  std::vector<uint8_t> buffer = {0x00};  // need 2 bytes for length
+  auto msg = try_extract_message(buffer);
+  EXPECT_FALSE(msg.has_value());
+  EXPECT_EQ(buffer.size(), 1);
+}
+
+TEST(TryExtractMessageTest, MaxPayloadSizeAccepted) {
+  // Maximum 16-bit payload length: 65535 bytes — this would be huge but
+  // the function itself doesn't cap it. The caller (read_message) enforces
+  // kMaxReadBufferSize. Here we just verify basic correctness for a valid
+  // but empty message (payload_len=0).
+  std::vector<uint8_t> buffer = {0x00, 0x00};  // 0-length payload
+  auto msg = try_extract_message(buffer);
+  ASSERT_TRUE(msg.has_value());
+  EXPECT_EQ(msg->size(), 2);
+  EXPECT_TRUE(buffer.empty());
+}

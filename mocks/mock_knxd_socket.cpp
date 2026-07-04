@@ -17,7 +17,8 @@
 
 namespace cvknxd {
 
-bool MockKnxdClient::connect(std::string_view /*socket_path*/) {
+bool MockKnxdClient::connect(std::string_view socket_path) {
+  last_socket_path_ = socket_path;
   connected_ = connection_success_;
   return connected_;
 }
@@ -25,6 +26,14 @@ bool MockKnxdClient::connect(std::string_view /*socket_path*/) {
 void MockKnxdClient::disconnect() {
   connected_ = false;
   group_socket_open_ = false;
+}
+
+bool MockKnxdClient::reconnect() {
+  if (last_socket_path_.empty())
+    return false;  // never connected
+  connected_ = connection_success_;
+  group_socket_open_ = false;  // caller must re-open group socket
+  return connected_;
 }
 
 bool MockKnxdClient::is_connected() const {
@@ -86,6 +95,7 @@ void MockKnxdClient::reset() {
   connected_ = false;
   group_socket_open_ = false;
   connection_success_ = true;
+  last_socket_path_.clear();
   cached_values_.clear();
   while (!telegram_queue_.empty())
     telegram_queue_.pop();

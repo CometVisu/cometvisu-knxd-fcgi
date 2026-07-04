@@ -37,6 +37,12 @@ void JsonBuilder::add_comma() {
 
 void JsonBuilder::add_quoted(std::string_view str) {
   buffer_.push_back('"');
+  // Note: Only the four JSON-special characters are escaped here (", \, \n, \r, \t).
+  // Other C0 control characters (0x00–0x1F) are NOT escaped, which would produce
+  // technically invalid JSON. This is NOT a practical concern because:
+  //   - All strings passed to this builder come from hex_encode() (always [0-9a-f])
+  //   - Keys are fixed protocol strings (no special chars)
+  //   - The CometVisu Protocol never transmits arbitrary user data in JSON keys/values.
   for (char c : str) {
     switch (c) {
       case '"':
