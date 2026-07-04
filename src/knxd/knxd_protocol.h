@@ -1,0 +1,111 @@
+// Copyright (C) 2026 Christian Mayer and the CometVisu contributors
+//
+// This program is free software: you can redistribute it and/or modify
+// it under the terms of the GNU General Public License as published by
+// the Free Software Foundation, either version 3 of the License, or
+// (at your option) any later version.
+//
+// This program is distributed in the hope that it will be useful,
+// but WITHOUT ANY WARRANTY; without even the implied warranty of
+// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+// GNU General Public License for more details.
+//
+// You should have received a copy of the GNU General Public License
+// along with this program.  If not, see <https://www.gnu.org/licenses/>.
+
+#pragma once
+
+#include <cstdint>
+#include <optional>
+#include <string>
+#include <string_view>
+#include <vector>
+
+namespace cvknxd {
+
+/// KNX group address: three-level X/Y/Z representation and 16-bit internal form.
+struct KnxGroupAddress {
+  uint8_t main = 0;    // X in X/Y/Z
+  uint8_t middle = 0;  // Y in X/Y/Z
+  uint8_t sub = 0;     // Z in X/Y/Z
+
+  /// Create from three-level address string "X/Y/Z".
+  /// Returns std::nullopt if the format is invalid.
+  [[nodiscard]] static std::optional<KnxGroupAddress> from_string(std::string_view str);
+
+  /// Convert to three-level string "X/Y/Z".
+  [[nodiscard]] std::string to_string() const;
+
+  /// Convert to 16-bit EIB group address.
+  [[nodiscard]] uint16_t to_eibaddr() const;
+
+  /// Create from 16-bit EIB group address.
+  [[nodiscard]] static KnxGroupAddress from_eibaddr(uint16_t addr);
+
+  bool operator==(const KnxGroupAddress&) const = default;
+};
+
+/// KNX address namespace prefix and group address.
+/// CometVisu format: "NAMESPACE:ADDRESS", e.g. "KNX:1/2/3".
+struct KnxAddress {
+  std::string ns;         // namespace, e.g. "KNX"
+  KnxGroupAddress group;  // group address part
+
+  /// Parse a CometVisu address string.
+  /// Returns std::nullopt if the format is invalid.
+  [[nodiscard]] static std::optional<KnxAddress> from_cometvisu(std::string_view str);
+
+  /// Convert back to CometVisu address format.
+  [[nodiscard]] std::string to_cometvisu() const;
+
+  bool operator==(const KnxAddress&) const = default;
+};
+
+/// APDU types for group communication.
+enum class ApduType : uint8_t {
+  Read = 0x00,      // A_GroupValue_Read
+  Response = 0x40,  // A_GroupValue_Response
+  Write = 0x80,     // A_GroupValue_Write
+};
+
+/// Build an APDU (Application Protocol Data Unit) for a group value.
+/// @param type The APCI type (Read/Response/Write).
+/// @param data The payload bytes.
+/// @return Encoded APDU bytes ready for transmission.
+[[nodiscard]] std::vector<uint8_t> build_apdu(ApduType type, const std::vector<uint8_t>& data);
+
+/// Parse a received APDU.
+/// @param apdu Raw APDU bytes (starting with the 2-byte APDU header).
+/// @param out_type Output: the APCI type.
+/// @param out_data Output: the payload bytes.
+/// @return true if parsing succeeded.
+[[nodiscard]] bool parse_apdu(const std::vector<uint8_t>& apdu, ApduType& out_type,
+                              std::vector<uint8_t>& out_data);
+
+/// EIB message type constants.
+namespace EibMessageType {
+constexpr uint16_t OPEN_GROUPCON = 0x0026;
+constexpr uint16_t GROUP_PACKET = 0x0027;
+constexpr uint16_t APDU_PACKET = 0x0025;
+constexpr uint16_t OPEN_T_GROUP = 0x0022;
+constexpr uint16_t CACHE_READ = 0x0200;
+constexpr uint16_t CACHE_READ_NOWAIT = 0x0201;
+}  // namespace EibMessageType
+
+/// Build a complete eibd wire message.
+/// Format: [2 bytes length, big-endian] [payload]
+/// @param type Message type (2 bytes).
+/// @param data Additional payload data after the type.
+/// @return Full wire-format message.
+[[nodiscard]] std::vector<uint8_t> build_eibd_message(uint16_t type,
+                                                      const std::vector<uint8_t>& data);
+
+/// Parse a received eibd wire message.
+/// @param raw Raw bytes received from socket.
+/// @param out_type Output: extracted message type.
+/// @param out_data Output: payload after type bytes.
+/// @return true if parsing succeeded.
+[[nodiscard]] bool parse_eibd_message(const std::vector<uint8_t>& raw, uint16_t& out_type,
+                                      std::vector<uint8_t>& out_data);
+
+}  // namespace cvknxd

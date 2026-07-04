@@ -1,0 +1,131 @@
+// Copyright (C) 2026 Christian Mayer and the CometVisu contributors
+//
+// This program is free software: you can redistribute it and/or modify
+// it under the terms of the GNU General Public License as published by
+// the Free Software Foundation, either version 3 of the License, or
+// (at your option) any later version.
+//
+// This program is distributed in the hope that it will be useful,
+// but WITHOUT ANY WARRANTY; without even the implied warranty of
+// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+// GNU General Public License for more details.
+//
+// You should have received a copy of the GNU General Public License
+// along with this program.  If not, see <https://www.gnu.org/licenses/>.
+
+#include <gtest/gtest.h>
+
+#include "handlers/write_handler.h"
+#include "knxd/knxd_protocol.h"
+#include "mock_knxd_socket.h"
+#include "state/address_cache.h"
+
+using namespace cvknxd;
+
+class WriteHandlerTest : public ::testing::Test {
+protected:
+  void SetUp() override {
+    knxd_.connect("/run/knx");
+    knxd_.open_group_socket(false);
+  }
+
+  MockKnxdClient knxd_;
+  AddressCache cache_;
+};
+
+TEST_F(WriteHandlerTest, WriteSingleAddress) {
+  WriteHandler handler(knxd_, cache_);
+
+  auto result = handler.handle("a=KNX:1/2/3&v=42");
+
+  EXPECT_EQ(result.http_status, 200);
+
+  auto sent = knxd_.sent_packets();
+  ASSERT_EQ(sent.size(), 1);
+  EXPECT_EQ(sent[0].group_addr, 0x0A03);  // 1/2/3
+
+  // Check APDU: 0x00 0x80|(0x42&0x3F) (Write + packed value)
+  ASSERT_EQ(sent[0].apdu.size(), 2);
+  EXPECT_EQ(sent[0].apdu[0], 0x00);
+  EXPECT_EQ(sent[0].apdu[1], 0x80 | (0x42 & 0x3F));
+}
+
+TEST_F(WriteHandlerTest, WriteMultiByteValue) {
+  WriteHandler handler(knxd_, cache_);
+
+  auto result = handler.handle("a=KNX:1/2/3&v=0c6f");
+
+  EXPECT_EQ(result.http_status, 200);
+
+  auto sent = knxd_.sent_packets();
+  ASSERT_EQ(sent.size(), 1);
+  ASSERT_EQ(sent[0].apdu.size(), 4);
+  EXPECT_EQ(sent[0].apdu[0], 0x00);
+  EXPECT_EQ(sent[0].apdu[1], 0x80);  // Write, multi-byte
+  EXPECT_EQ(sent[0].apdu[2], 0x0C);
+  EXPECT_EQ(sent[0].apdu[3], 0x6F);
+}
+
+TEST_F(WriteHandlerTest, WriteMultipleAddresses) {
+  WriteHandler handler(knxd_, cache_);
+
+  auto result = handler.handle("a=KNX:1/2/3&a=KNX:4/5/6&v=42");
+
+  EXPECT_EQ(result.http_status, 200);
+
+  auto sent = knxd_.sent_packets();
+  ASSERT_EQ(sent.size(), 2);
+  EXPECT_EQ(sent[0].group_addr, 0x0A03);  // 1/2/3
+  EXPECT_EQ(sent[1].group_addr, 0x2506);  // 4/5/6
+}
+
+TEST_F(WriteHandlerTest, MissingAddress) {
+  WriteHandler handler(knxd_, cache_);
+  auto result = handler.handle("v=42");
+  EXPECT_EQ(result.http_status, 400);
+  EXPECT_TRUE(knxd_.sent_packets().empty());
+}
+
+TEST_F(WriteHandlerTest, MissingValue) {
+  WriteHandler handler(knxd_, cache_);
+  auto result = handler.handle("a=KNX:1/2/3");
+  EXPECT_EQ(result.http_status, 400);
+  EXPECT_TRUE(knxd_.sent_packets().empty());
+}
+
+TEST_F(WriteHandlerTest, InvalidHexValue) {
+  WriteHandler handler(knxd_, cache_);
+  auto result = handler.handle("a=KNX:1/2/3&v=ZZ");
+  EXPECT_EQ(result.http_status, 400);
+  EXPECT_TRUE(knxd_.sent_packets().empty());
+}
+
+TEST_F(WriteHandlerTest, InvalidAddress) {
+  WriteHandler handler(knxd_, cache_);
+  auto result = handler.handle("a=invalid&v=42");
+  EXPECT_EQ(result.http_status, 404);
+  EXPECT_TRUE(knxd_.sent_packets().empty());
+}
+
+TEST_F(WriteHandlerTest, UpdatesCache) {
+  WriteHandler handler(knxd_, cache_);
+
+  handler.handle("a=KNX:1/2/3&v=0c6f");
+
+  auto cached = cache_.get_any(0x0A03);
+  ASSERT_TRUE(cached.has_value());
+  ASSERT_EQ(cached->size(), 2);
+  EXPECT_EQ((*cached)[0], 0x0C);
+  EXPECT_EQ((*cached)[1], 0x6F);
+}
+
+TEST_F(WriteHandlerTest, DefaultNamespace) {
+  WriteHandler handler(knxd_, cache_);
+
+  auto result = handler.handle("a=1/2/3&v=42");
+
+  EXPECT_EQ(result.http_status, 200);
+  auto sent = knxd_.sent_packets();
+  ASSERT_EQ(sent.size(), 1);
+  EXPECT_EQ(sent[0].group_addr, 0x0A03);
+}

@@ -1,0 +1,127 @@
+// Copyright (C) 2026 Christian Mayer and the CometVisu contributors
+//
+// This program is free software: you can redistribute it and/or modify
+// it under the terms of the GNU General Public License as published by
+// the Free Software Foundation, either version 3 of the License, or
+// (at your option) any later version.
+//
+// This program is distributed in the hope that it will be useful,
+// but WITHOUT ANY WARRANTY; without even the implied warranty of
+// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+// GNU General Public License for more details.
+//
+// You should have received a copy of the GNU General Public License
+// along with this program.  If not, see <https://www.gnu.org/licenses/>.
+
+#include <gtest/gtest.h>
+
+#include "handlers/read_handler.h"
+#include "knxd/knxd_protocol.h"
+#include "mock_knxd_socket.h"
+#include "state/address_cache.h"
+#include "state/long_poll.h"
+
+using namespace cvknxd;
+
+class ReadHandlerTest : public ::testing::Test {
+protected:
+  void SetUp() override {
+    knxd_.connect("/run/knx");
+    knxd_.open_group_socket(false);
+  }
+
+  MockKnxdClient knxd_;
+  AddressCache cache_;
+  LongPollManager long_poll_;
+};
+
+TEST_F(ReadHandlerTest, ReadFromCachePositiveTimeout) {
+  ReadHandler handler(knxd_, cache_, long_poll_);
+
+  // Pre-populate cache (via manual update)
+  std::vector<uint8_t> data = {0x0C, 0x6F};
+  cache_.update(0x0A03, data);
+
+  auto result = handler.handle("a=KNX:1/2/3&t=30");
+
+  EXPECT_EQ(result.http_status, 200);
+  EXPECT_NE(result.body.find("KNX:1/2/3"), std::string::npos);
+  EXPECT_NE(result.body.find("0c6f"), std::string::npos);
+}
+
+TEST_F(ReadHandlerTest, ReadFromKnxdCacheTimeoutZero) {
+  ReadHandler handler(knxd_, cache_, long_poll_);
+
+  // Set up mock knxd cache
+  std::vector<uint8_t> data = {0x42};
+  knxd_.set_cached_value(0x0A03, data);
+
+  auto result = handler.handle("a=KNX:1/2/3&t=0");
+
+  EXPECT_EQ(result.http_status, 200);
+  EXPECT_NE(result.body.find("KNX:1/2/3"), std::string::npos);
+  EXPECT_NE(result.body.find("42"), std::string::npos);
+}
+
+TEST_F(ReadHandlerTest, NegativeTimeoutCacheOnly) {
+  ReadHandler handler(knxd_, cache_, long_poll_);
+
+  // Only cache, no knxd mock value — should return 404
+  auto result = handler.handle("a=KNX:1/2/3&t=-1");
+  EXPECT_EQ(result.http_status, 404);
+}
+
+TEST_F(ReadHandlerTest, NoAddresses) {
+  ReadHandler handler(knxd_, cache_, long_poll_);
+  auto result = handler.handle("s=abc&t=0");
+  EXPECT_EQ(result.http_status, 400);
+}
+
+TEST_F(ReadHandlerTest, MultipleAddresses) {
+  ReadHandler handler(knxd_, cache_, long_poll_);
+
+  cache_.update(0x0A03, {0x42});
+  cache_.update(0x0B04, {0x0C, 0x6F});
+
+  auto result = handler.handle("a=KNX:1/2/3&a=KNX:1/3/4&t=30");
+
+  EXPECT_EQ(result.http_status, 200);
+  EXPECT_NE(result.body.find("KNX:1/2/3"), std::string::npos);
+  EXPECT_NE(result.body.find("42"), std::string::npos);
+  EXPECT_NE(result.body.find("KNX:1/3/4"), std::string::npos);
+  EXPECT_NE(result.body.find("0c6f"), std::string::npos);
+}
+
+TEST_F(ReadHandlerTest, LongPollGetsTelegram) {
+  ReadHandler handler(knxd_, cache_, long_poll_);
+
+  // Enqueue a telegram that will be received during polling
+  knxd_.enqueue_telegram(0x0A03, {0x00, 0x80, 0x42});
+
+  // Long-poll (no timeout parameter)
+  auto result = handler.handle("a=KNX:1/2/3");
+
+  EXPECT_EQ(result.http_status, 200);
+  EXPECT_NE(result.body.find("KNX:1/2/3"), std::string::npos);
+  EXPECT_NE(result.body.find("42"), std::string::npos);
+}
+
+TEST_F(ReadHandlerTest, IndexIncluded) {
+  ReadHandler handler(knxd_, cache_, long_poll_);
+
+  cache_.update(0x0A03, {0x42});
+  auto result = handler.handle("a=KNX:1/2/3&t=30");
+
+  EXPECT_NE(result.body.find("\"i\":\"1\""), std::string::npos);
+}
+
+TEST_F(ReadHandlerTest, InvalidAddressIgnored) {
+  ReadHandler handler(knxd_, cache_, long_poll_);
+
+  cache_.update(0x0A03, {0x42});
+  auto result = handler.handle("a=KNX:1/2/3&a=invalid&t=30");
+
+  // Should still return the valid address
+  EXPECT_EQ(result.http_status, 200);
+  EXPECT_NE(result.body.find("KNX:1/2/3"), std::string::npos);
+}

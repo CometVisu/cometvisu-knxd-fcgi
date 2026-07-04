@@ -1,0 +1,85 @@
+// Copyright (C) 2026 Christian Mayer and the CometVisu contributors
+//
+// This program is free software: you can redistribute it and/or modify
+// it under the terms of the GNU General Public License as published by
+// the Free Software Foundation, either version 3 of the License, or
+// (at your option) any later version.
+//
+// This program is distributed in the hope that it will be useful,
+// but WITHOUT ANY WARRANTY; without even the implied warranty of
+// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+// GNU General Public License for more details.
+//
+// You should have received a copy of the GNU General Public License
+// along with this program.  If not, see <https://www.gnu.org/licenses/>.
+
+#include <gtest/gtest.h>
+
+#include "state/session_store.h"
+
+using namespace cvknxd;
+
+TEST(SessionStoreTest, CreateAnonymousSession) {
+  SessionStore store;
+  std::string id = store.create_session(true);
+  EXPECT_EQ(id, "0");
+}
+
+TEST(SessionStoreTest, CreateNormalSession) {
+  SessionStore store;
+  std::string id = store.create_session(false);
+  EXPECT_NE(id, "0");
+  EXPECT_FALSE(id.empty());
+}
+
+TEST(SessionStoreTest, ValidateSession) {
+  SessionStore store;
+  std::string id = store.create_session(false);
+  EXPECT_TRUE(store.is_valid(id));
+}
+
+TEST(SessionStoreTest, AnonymousAlwaysValid) {
+  SessionStore store;
+  EXPECT_TRUE(store.is_valid("0"));
+}
+
+TEST(SessionStoreTest, InvalidSession) {
+  SessionStore store;
+  EXPECT_FALSE(store.is_valid("nonexistent"));
+}
+
+TEST(SessionStoreTest, RemoveSession) {
+  SessionStore store;
+  std::string id = store.create_session(false);
+  EXPECT_TRUE(store.is_valid(id));
+  store.remove(id);
+  EXPECT_FALSE(store.is_valid(id));
+}
+
+TEST(SessionStoreTest, RemoveAnonymousNoop) {
+  SessionStore store;
+  store.create_session(true);
+  store.remove("0");
+  EXPECT_TRUE(store.is_valid("0"));  // anonymous always valid
+}
+
+TEST(SessionStoreTest, MultipleSessions) {
+  SessionStore store;
+  auto id1 = store.create_session(false);
+  auto id2 = store.create_session(false);
+  EXPECT_NE(id1, id2);
+  EXPECT_TRUE(store.is_valid(id1));
+  EXPECT_TRUE(store.is_valid(id2));
+  EXPECT_EQ(store.count(), 2);
+}
+
+TEST(SessionStoreTest, Count) {
+  SessionStore store;
+  EXPECT_EQ(store.count(), 0);
+  store.create_session(false);
+  EXPECT_EQ(store.count(), 1);
+  store.create_session(true);  // anonymous not counted
+  EXPECT_EQ(store.count(), 1);
+  store.create_session(false);
+  EXPECT_EQ(store.count(), 2);
+}

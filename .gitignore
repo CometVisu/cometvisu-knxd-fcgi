@@ -1,0 +1,27 @@
+# Build
+build/
+cmake-build-*/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# Compiled
+*.o
+*.obj
+*.exe
+*.out
+*.a
+*.so
+*.dylib
+
+# Test
+Testing/
+CTestTestfile.cmake
+
+# Misc
+.DS_Store
+*.log
