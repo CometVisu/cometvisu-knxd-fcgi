@@ -28,6 +28,11 @@ set(CMAKE_CXX_EXTENSIONS OFF)
 option(BUILD_TESTING "Build tests" ON)
 option(ENABLE_SANITIZERS "Enable address/undefined-behavior sanitizers" OFF)
 
+# Path to a knxd source checkout (e.g. -DKNXD_SOURCE_DIR=/path/to/knxd).
+# When set, headers are taken from <KNXD_SOURCE_DIR>/include/ instead of
+# the system-installed knxd-dev package.
+set(KNXD_SOURCE_DIR "" CACHE PATH "Path to knxd source checkout")
+
 # ---- Dependencies ----
 include(FetchContent)
 
@@ -52,6 +57,35 @@ find_path(FCGI_INCLUDE_DIR fcgi_stdio.h)
 if(NOT FCGI_INCLUDE_DIR)
     message(FATAL_ERROR "FastCGI headers not found. "
             "Install with: sudo apt install libfcgi-dev")
+endif()
+
+# Find knxd development headers (eibtypes.h for protocol constants).
+# Supports two modes:
+#   1. -DKNXD_SOURCE_DIR=/path/to/knxd  → uses headers from a source checkout
+#   2. Omitting KNXD_SOURCE_DIR          → uses system-installed knxd-dev package
+if(KNXD_SOURCE_DIR)
+    # User provided a knxd source checkout — look for eibtypes.h there.
+    # knxd keeps its public headers in <source>/include/.
+    find_path(KNXD_INCLUDE_DIR eibtypes.h
+        HINTS "${KNXD_SOURCE_DIR}/include"
+        NO_DEFAULT_PATH
+    )
+    if(NOT KNXD_INCLUDE_DIR)
+        message(FATAL_ERROR "KNXD_SOURCE_DIR=${KNXD_SOURCE_DIR} but "
+                "eibtypes.h not found in ${KNXD_SOURCE_DIR}/include/")
+    endif()
+    message(STATUS "Using knxd headers from source checkout: ${KNXD_INCLUDE_DIR}")
+else()
+    # No source dir given — search system include paths (knxd-dev package).
+    find_path(KNXD_INCLUDE_DIR eibtypes.h)
+    if(NOT KNXD_INCLUDE_DIR)
+        message(FATAL_ERROR "knxd development headers (eibtypes.h) not found.\n"
+                "  Option A: Install the system package:\n"
+                "    sudo apt install knxd-dev\n"
+                "  Option B: Point CMake to a knxd source checkout:\n"
+                "    cmake -B build -DKNXD_SOURCE_DIR=/path/to/knxd")
+    endif()
+    message(STATUS "Using knxd headers from system: ${KNXD_INCLUDE_DIR}")
 endif()
 
 # ---- Compiler Settings ----
