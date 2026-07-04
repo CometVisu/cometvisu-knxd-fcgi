@@ -16,6 +16,7 @@
 #pragma once
 
 #include <cstdint>
+#include <optional>
 #include <string>
 #include <string_view>
 
@@ -24,10 +25,11 @@ namespace cvknxd {
 class KnxdClientInterface;
 class AddressCache;
 class LongPollManager;
+class SessionStore;
 
 /// Result of a read operation.
 struct ReadResult {
-  /// HTTP status code (200, 401, 403, 404).
+  /// HTTP status code (200, 400, 401, 403, 404).
   int http_status = 200;
   /// JSON response body.
   std::string body;
@@ -39,7 +41,8 @@ struct ReadResult {
 /// This is the most complex handler due to long-poll (COMET) support.
 class ReadHandler {
 public:
-  ReadHandler(KnxdClientInterface& knxd, AddressCache& cache, LongPollManager& long_poll);
+  ReadHandler(KnxdClientInterface& knxd, AddressCache& cache, LongPollManager& long_poll,
+              SessionStore& sessions, int longpoll_timeout_sec = 60);
 
   /// Process a read request.
   /// @param query_string Raw QUERY_STRING from FCGI.
@@ -50,9 +53,12 @@ private:
   KnxdClientInterface& knxd_;
   AddressCache& cache_;
   LongPollManager& long_poll_;
+  SessionStore& sessions_;
+  int longpoll_timeout_sec_;
   uint64_t index_counter_ = 1;
 
   [[nodiscard]] std::string generate_index();
+  [[nodiscard]] static std::optional<int> parse_timeout(std::string_view t_str);
 };
 
 }  // namespace cvknxd

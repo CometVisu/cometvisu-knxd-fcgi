@@ -15,6 +15,8 @@
 
 #include "knxd_client.h"
 
+#include <fcntl.h>
+#include <poll.h>
 #include <sys/socket.h>
 #include <sys/un.h>
 #include <unistd.h>
@@ -205,6 +207,21 @@ std::optional<std::vector<uint8_t>> KnxdClient::cache_read(uint16_t group_addr, 
   }
 
   return std::nullopt;
+}
+
+int KnxdClient::get_fd() const {
+  return impl_->fd;
+}
+
+void KnxdClient::set_nonblocking(bool enable) {
+  if (impl_->fd < 0) return;
+  int flags = ::fcntl(impl_->fd, F_GETFL, 0);
+  if (flags < 0) return;
+  if (enable) {
+    ::fcntl(impl_->fd, F_SETFL, flags | O_NONBLOCK);
+  } else {
+    ::fcntl(impl_->fd, F_SETFL, flags & ~O_NONBLOCK);
+  }
 }
 
 bool KnxdClient::poll_group_telegram(uint16_t& out_group_addr, std::vector<uint8_t>& out_apdu) {

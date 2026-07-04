@@ -47,7 +47,6 @@ private:
   };
 
   std::unordered_map<std::string, Session> sessions_;
-  uint64_t next_id_ = 1;
 
   [[nodiscard]] std::string generate_id();
 };

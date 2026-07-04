@@ -18,30 +18,39 @@
 #include "../knxd/knxd_client.h"
 #include "../knxd/knxd_protocol.h"
 #include "../state/address_cache.h"
+#include "../state/session_store.h"
 #include "../util/hex.h"
 #include "../util/query_string.h"
 
 namespace cvknxd {
 
-WriteHandler::WriteHandler(KnxdClientInterface& knxd, AddressCache& cache)
-    : knxd_(knxd), cache_(cache) {}
+WriteHandler::WriteHandler(KnxdClientInterface& knxd, AddressCache& cache,
+                           SessionStore& sessions)
+    : knxd_(knxd), cache_(cache), sessions_(sessions) {}
 
 WriteResult WriteHandler::handle(std::string_view query_string) {
   QueryString params{query_string};
   WriteResult result;
 
-  // Get addresses
+  // ---- Parameter validation first (400 takes priority over 401) ----
   auto addresses = params.get_all("a");
   if (addresses.empty()) {
     result.http_status = 400;
     return result;
   }
 
-  // Get value
   auto value_opt = params.get("v");
   if (!value_opt) {
     result.http_status = 400;
     return result;
+  }
+
+  // ---- Session validation ----
+  if (auto s_opt = params.get("s")) {
+    if (!sessions_.is_valid(*s_opt)) {
+      result.http_status = 401;
+      return result;
+    }
   }
 
   // Decode hex value

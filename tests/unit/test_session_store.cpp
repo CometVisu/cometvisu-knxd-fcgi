@@ -73,6 +73,17 @@ TEST(SessionStoreTest, MultipleSessions) {
   EXPECT_EQ(store.count(), 2);
 }
 
+TEST(SessionStoreTest, SessionIdsAreRandom) {
+  SessionStore store;
+  auto id1 = store.create_session(false);
+  auto id2 = store.create_session(false);
+  // IDs should be 16 hex chars (64-bit random, not sequential)
+  EXPECT_EQ(id1.size(), 16);
+  EXPECT_EQ(id2.size(), 16);
+  EXPECT_NE(id1, id2);
+  EXPECT_NE(id2, "1");  // not sequential
+}
+
 TEST(SessionStoreTest, Count) {
   SessionStore store;
   EXPECT_EQ(store.count(), 0);

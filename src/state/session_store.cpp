@@ -43,17 +43,18 @@ void SessionStore::remove(std::string_view session_id) {
 }
 
 std::string SessionStore::generate_id() {
-  // Simple: hex counter. More sophisticated randomness could be used.
+  // Cryptographically secure random session IDs
+  static thread_local std::random_device rd;
+  static thread_local std::mt19937_64 gen(rd());
+  static thread_local std::uniform_int_distribution<uint64_t> dist;
+
+  uint64_t num = dist(gen);
   std::string id;
   id.reserve(16);
-  auto num = next_id_++;
-  while (num > 0) {
-    static constexpr char kHex[] = "0123456789abcdef";
-    id.insert(id.begin(), kHex[num & 0xF]);
-    num >>= 4;
+  static constexpr char kHex[] = "0123456789abcdef";
+  for (int i = 0; i < 16; ++i) {
+    id.push_back(kHex[(num >> (60 - i * 4)) & 0xF]);
   }
-  if (id.empty())
-    id = "0";
   return id;
 }
 

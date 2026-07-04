@@ -19,6 +19,7 @@
 #include "knxd/knxd_protocol.h"
 #include "mock_knxd_socket.h"
 #include "state/address_cache.h"
+#include "state/session_store.h"
 
 using namespace cvknxd;
 
@@ -31,10 +32,11 @@ protected:
 
   MockKnxdClient knxd_;
   AddressCache cache_;
+  SessionStore sessions_;
 };
 
 TEST_F(WriteHandlerTest, WriteSingleAddress) {
-  WriteHandler handler(knxd_, cache_);
+  WriteHandler handler(knxd_, cache_, sessions_);
 
   auto result = handler.handle("a=KNX:1/2/3&v=42");
 
@@ -51,7 +53,7 @@ TEST_F(WriteHandlerTest, WriteSingleAddress) {
 }
 
 TEST_F(WriteHandlerTest, WriteMultiByteValue) {
-  WriteHandler handler(knxd_, cache_);
+  WriteHandler handler(knxd_, cache_, sessions_);
 
   auto result = handler.handle("a=KNX:1/2/3&v=0c6f");
 
@@ -67,7 +69,7 @@ TEST_F(WriteHandlerTest, WriteMultiByteValue) {
 }
 
 TEST_F(WriteHandlerTest, WriteMultipleAddresses) {
-  WriteHandler handler(knxd_, cache_);
+  WriteHandler handler(knxd_, cache_, sessions_);
 
   auto result = handler.handle("a=KNX:1/2/3&a=KNX:4/5/6&v=42");
 
@@ -80,35 +82,35 @@ TEST_F(WriteHandlerTest, WriteMultipleAddresses) {
 }
 
 TEST_F(WriteHandlerTest, MissingAddress) {
-  WriteHandler handler(knxd_, cache_);
+  WriteHandler handler(knxd_, cache_, sessions_);
   auto result = handler.handle("v=42");
   EXPECT_EQ(result.http_status, 400);
   EXPECT_TRUE(knxd_.sent_packets().empty());
 }
 
 TEST_F(WriteHandlerTest, MissingValue) {
-  WriteHandler handler(knxd_, cache_);
+  WriteHandler handler(knxd_, cache_, sessions_);
   auto result = handler.handle("a=KNX:1/2/3");
   EXPECT_EQ(result.http_status, 400);
   EXPECT_TRUE(knxd_.sent_packets().empty());
 }
 
 TEST_F(WriteHandlerTest, InvalidHexValue) {
-  WriteHandler handler(knxd_, cache_);
+  WriteHandler handler(knxd_, cache_, sessions_);
   auto result = handler.handle("a=KNX:1/2/3&v=ZZ");
   EXPECT_EQ(result.http_status, 400);
   EXPECT_TRUE(knxd_.sent_packets().empty());
 }
 
 TEST_F(WriteHandlerTest, InvalidAddress) {
-  WriteHandler handler(knxd_, cache_);
+  WriteHandler handler(knxd_, cache_, sessions_);
   auto result = handler.handle("a=invalid&v=42");
   EXPECT_EQ(result.http_status, 404);
   EXPECT_TRUE(knxd_.sent_packets().empty());
 }
 
 TEST_F(WriteHandlerTest, UpdatesCache) {
-  WriteHandler handler(knxd_, cache_);
+  WriteHandler handler(knxd_, cache_, sessions_);
 
   handler.handle("a=KNX:1/2/3&v=0c6f");
 
@@ -120,7 +122,7 @@ TEST_F(WriteHandlerTest, UpdatesCache) {
 }
 
 TEST_F(WriteHandlerTest, DefaultNamespace) {
-  WriteHandler handler(knxd_, cache_);
+  WriteHandler handler(knxd_, cache_, sessions_);
 
   auto result = handler.handle("a=1/2/3&v=42");
 
@@ -128,4 +130,29 @@ TEST_F(WriteHandlerTest, DefaultNamespace) {
   auto sent = knxd_.sent_packets();
   ASSERT_EQ(sent.size(), 1);
   EXPECT_EQ(sent[0].group_addr, 0x0A03);
+}
+
+TEST_F(WriteHandlerTest, SessionInvalidReturns401) {
+  sessions_.create_session(false);
+
+  WriteHandler handler(knxd_, cache_, sessions_);
+  auto result = handler.handle("a=KNX:1/2/3&v=42&s=nonexistent");
+  EXPECT_EQ(result.http_status, 401);
+  EXPECT_TRUE(knxd_.sent_packets().empty());
+}
+
+TEST_F(WriteHandlerTest, AnonymousSessionOk) {
+  WriteHandler handler(knxd_, cache_, sessions_);
+  auto result = handler.handle("a=KNX:1/2/3&v=42&s=0");
+  EXPECT_EQ(result.http_status, 200);
+  EXPECT_FALSE(knxd_.sent_packets().empty());
+}
+
+TEST_F(WriteHandlerTest, ValidSessionWrites) {
+  auto sid = sessions_.create_session(false);
+
+  WriteHandler handler(knxd_, cache_, sessions_);
+  auto result = handler.handle("a=KNX:1/2/3&v=42&s=" + sid);
+  EXPECT_EQ(result.http_status, 200);
+  EXPECT_FALSE(knxd_.sent_packets().empty());
 }

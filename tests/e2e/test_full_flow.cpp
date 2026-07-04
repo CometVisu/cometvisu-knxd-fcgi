@@ -65,8 +65,8 @@ TEST_F(FullFlowTest, AuthenticatedLogin) {
 // ---- Write then Read Flow ----
 
 TEST_F(FullFlowTest, WriteThenRead) {
-  WriteHandler write_handler(knxd_, cache_);
-  ReadHandler read_handler(knxd_, cache_, long_poll_);
+  WriteHandler write_handler(knxd_, cache_, sessions_);
+  ReadHandler read_handler(knxd_, cache_, long_poll_, sessions_);
 
   // Step 1: Write a value
   auto write_result = write_handler.handle("a=KNX:1/2/3&v=0c6f");
@@ -149,7 +149,7 @@ TEST_F(FullFlowTest, LoginResponseStructure) {
 }
 
 TEST_F(FullFlowTest, ReadResponseStructure) {
-  ReadHandler handler(knxd_, cache_, long_poll_);
+  ReadHandler handler(knxd_, cache_, long_poll_, sessions_);
   cache_.update(0x0A03, {0x42});
 
   auto result = handler.handle("a=KNX:1/2/3&t=30");
@@ -170,7 +170,7 @@ TEST_F(FullFlowTest, CacheIsUpdatedAfterReceive) {
   std::vector<uint8_t> data = {0x0C, 0x6F};
   cache_.update(0x0A03, data);
 
-  ReadHandler handler(knxd_, cache_, long_poll_);
+  ReadHandler handler(knxd_, cache_, long_poll_, sessions_);
   auto result = handler.handle("a=KNX:1/2/3&t=30");
   EXPECT_NE(result.body.find("0c6f"), std::string::npos);
 }

@@ -19,6 +19,7 @@
 #include <functional>
 #include <queue>
 #include <string>
+#include <unordered_map>
 #include <vector>
 
 #include "../src/knxd/knxd_client.h"
@@ -43,6 +44,8 @@ public:
                                                                bool nowait) override;
   [[nodiscard]] bool poll_group_telegram(uint16_t& out_group_addr,
                                          std::vector<uint8_t>& out_apdu) override;
+  [[nodiscard]] int get_fd() const override;
+  void set_nonblocking(bool enable) override;
   void set_telegram_callback(GroupTelegramCallback callback) override;
 
   // ---- Test helpers ----

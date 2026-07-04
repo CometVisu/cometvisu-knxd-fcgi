@@ -70,6 +70,13 @@ public:
   [[nodiscard]] virtual bool poll_group_telegram(uint16_t& out_group_addr,
                                                  std::vector<uint8_t>& out_apdu) = 0;
 
+  /// Get the underlying file descriptor for poll()/select() integration.
+  /// Returns -1 if not connected.
+  [[nodiscard]] virtual int get_fd() const = 0;
+
+  /// Set the socket to non-blocking mode.
+  virtual void set_nonblocking(bool enable) = 0;
+
   /// Set callback for incoming group telegrams.
   virtual void set_telegram_callback(GroupTelegramCallback callback) = 0;
 };
@@ -96,6 +103,8 @@ public:
                                                                bool nowait) override;
   [[nodiscard]] bool poll_group_telegram(uint16_t& out_group_addr,
                                          std::vector<uint8_t>& out_apdu) override;
+  [[nodiscard]] int get_fd() const override;
+  void set_nonblocking(bool enable) override;
   void set_telegram_callback(GroupTelegramCallback callback) override;
 
 private:

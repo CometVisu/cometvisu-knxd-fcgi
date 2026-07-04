@@ -22,10 +22,11 @@ namespace cvknxd {
 
 class KnxdClientInterface;
 class AddressCache;
+class SessionStore;
 
 /// Result of a write operation.
 struct WriteResult {
-  /// HTTP status code (200, 401, 403, 404).
+  /// HTTP status code (200, 400, 401, 403, 404).
   int http_status = 200;
   /// Response body (always empty for write).
   std::string body;
@@ -34,7 +35,7 @@ struct WriteResult {
 /// Handles CometVisu write requests: GET /w?s=SESSION&a=ADDRESS&v=VALUE
 class WriteHandler {
 public:
-  WriteHandler(KnxdClientInterface& knxd, AddressCache& cache);
+  WriteHandler(KnxdClientInterface& knxd, AddressCache& cache, SessionStore& sessions);
 
   /// Process a write request.
   /// @param query_string Raw QUERY_STRING from FCGI.
@@ -44,6 +45,7 @@ public:
 private:
   KnxdClientInterface& knxd_;
   AddressCache& cache_;
+  SessionStore& sessions_;
 };
 
 }  // namespace cvknxd

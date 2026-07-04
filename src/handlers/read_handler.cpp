@@ -15,31 +15,57 @@
 
 #include "read_handler.h"
 
+#include <poll.h>
+
+#include <cerrno>
+#include <chrono>
 #include <set>
-#include <thread>
 
 #include "../knxd/knxd_client.h"
 #include "../knxd/knxd_protocol.h"
 #include "../state/address_cache.h"
 #include "../state/long_poll.h"
+#include "../state/session_store.h"
 #include "../util/hex.h"
 #include "../util/json_builder.h"
 #include "../util/query_string.h"
 
 namespace cvknxd {
 
-ReadHandler::ReadHandler(KnxdClientInterface& knxd, AddressCache& cache, LongPollManager& long_poll)
-    : knxd_(knxd), cache_(cache), long_poll_(long_poll) {}
+ReadHandler::ReadHandler(KnxdClientInterface& knxd, AddressCache& cache,
+                         LongPollManager& long_poll, SessionStore& sessions,
+                         int longpoll_timeout_sec)
+    : knxd_(knxd),
+      cache_(cache),
+      long_poll_(long_poll),
+      sessions_(sessions),
+      longpoll_timeout_sec_(longpoll_timeout_sec) {}
 
 std::string ReadHandler::generate_index() {
   return std::to_string(index_counter_++);
+}
+
+std::optional<int> ReadHandler::parse_timeout(std::string_view t_str) {
+  if (t_str.empty()) return std::nullopt;
+  try {
+    // Use size_t to verify entire string was consumed
+    std::string s{t_str};
+    size_t pos = 0;
+    int val = std::stoi(s, &pos);
+    if (pos != s.size()) return std::nullopt;  // trailing garbage
+    return val;
+  } catch (const std::invalid_argument&) {
+    return std::nullopt;
+  } catch (const std::out_of_range&) {
+    return std::nullopt;
+  }
 }
 
 ReadResult ReadHandler::handle(std::string_view query_string) {
   QueryString params{query_string};
   ReadResult result;
 
-  // Get addresses to read
+  // ---- Get addresses first (before session check, so 400 takes priority) ----
   auto addresses = params.get_all("a");
   if (addresses.empty()) {
     result.http_status = 400;
@@ -47,20 +73,33 @@ ReadResult ReadHandler::handle(std::string_view query_string) {
     return result;
   }
 
-  // Parse timeout
-  int timeout = -999;  // sentinel: not provided → long-poll
-  if (auto t_opt = params.get("t")) {
-    timeout = std::stoi(std::string{*t_opt});
+  // ---- Session validation ----
+  if (auto s_opt = params.get("s")) {
+    if (!sessions_.is_valid(*s_opt)) {
+      result.http_status = 401;
+      result.body = "{}";
+      return result;
+    }
   }
 
-  // Collect EIB addresses to query
+  // ---- Parse timeout ----
+  std::optional<int> timeout;
+  if (auto t_opt = params.get("t")) {
+    timeout = parse_timeout(*t_opt);
+    if (!timeout.has_value()) {
+      result.http_status = 400;
+      result.body = "{}";
+      return result;
+    }
+  }
+
+  // ---- Collect EIB addresses ----
   std::set<uint16_t> eib_addrs;
   for (auto addr_str : addresses) {
     auto parsed = KnxAddress::from_cometvisu(addr_str);
     if (parsed) {
       eib_addrs.insert(parsed->group.to_eibaddr());
     }
-    // Unknown addresses are ignored (protocol doesn't specify error per-address)
   }
 
   if (eib_addrs.empty()) {
@@ -69,14 +108,9 @@ ReadResult ReadHandler::handle(std::string_view query_string) {
     return result;
   }
 
-  // Long-poll mode: no timeout parameter provided
-  if (timeout == -999) {
-    // In single-threaded FCGI, long-poll is cooperative.
-    // We poll the knxd socket for new data for a configurable duration.
-    // This is a simplified blocking implementation.
-    constexpr int kLongPollMaxSeconds = 60;
-
-    // Check cache first for any recent values
+  // ---- Long-poll mode: no timeout parameter ----
+  if (!timeout.has_value()) {
+    // Check cache first for recent values
     JsonBuilder json;
     json.start_object();
     json.add_key("d");
@@ -84,7 +118,7 @@ ReadResult ReadHandler::handle(std::string_view query_string) {
 
     bool has_data = false;
     for (auto addr : eib_addrs) {
-      auto cached = cache_.get(addr, 5);  // 5 second freshness
+      auto cached = cache_.get(addr, 5);
       if (cached) {
         auto cv_addr = KnxAddress{"KNX", KnxGroupAddress::from_eibaddr(addr)};
         json.add_string(cv_addr.to_cometvisu(), hex_encode(cached->data(), cached->size()));
@@ -100,41 +134,92 @@ ReadResult ReadHandler::handle(std::string_view query_string) {
       return result;
     }
 
-    // Poll knxd for new data (blocking, with timeout)
-    auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(kLongPollMaxSeconds);
-
-    while (std::chrono::steady_clock::now() < deadline) {
+    // ---- Efficient poll-based wait on knxd socket ----
+    int knxd_fd = knxd_.get_fd();
+    if (knxd_fd < 0) {
+      // No real fd (e.g., mock): fall back to quick poll
       uint16_t recv_addr;
       std::vector<uint8_t> apdu_data;
-
       if (knxd_.poll_group_telegram(recv_addr, apdu_data)) {
-        // Update cache
         cache_.update(recv_addr, apdu_data);
-
-        // Check if this is an address we're waiting for
         if (eib_addrs.find(recv_addr) != eib_addrs.end()) {
           JsonBuilder resp;
           resp.start_object();
           resp.add_key("d");
           resp.start_object();
           auto cv_addr = KnxAddress{"KNX", KnxGroupAddress::from_eibaddr(recv_addr)};
-          resp.add_string(cv_addr.to_cometvisu(), hex_encode(apdu_data.data(), apdu_data.size()));
+          resp.add_string(cv_addr.to_cometvisu(),
+                          hex_encode(apdu_data.data(), apdu_data.size()));
           resp.end_object();
           resp.add_string("i", generate_index());
           resp.end_object();
           result.body = resp.take();
           return result;
         }
-
-        // Also notify long-poll manager for other waiters
         long_poll_.notify(recv_addr, hex_encode(apdu_data.data(), apdu_data.size()));
       }
-
-      // Small sleep to avoid busy-waiting
-      std::this_thread::sleep_for(std::chrono::milliseconds(100));
+      // Timeout with no data
+      JsonBuilder resp;
+      resp.start_object();
+      resp.add_key("d");
+      resp.start_object();
+      resp.end_object();
+      resp.add_string("i", generate_index());
+      resp.end_object();
+      result.body = resp.take();
+      return result;
     }
 
-    // Timeout: return empty response
+    // Use poll() on the knxd socket — efficient, no CPU burning
+    auto deadline =
+        std::chrono::steady_clock::now() + std::chrono::seconds(longpoll_timeout_sec_);
+
+    while (true) {
+      auto remaining = std::chrono::duration_cast<std::chrono::milliseconds>(
+                           deadline - std::chrono::steady_clock::now())
+                           .count();
+      if (remaining <= 0) break;  // timeout
+
+      struct pollfd pfd;
+      pfd.fd = knxd_fd;
+      pfd.events = POLLIN;
+      pfd.revents = 0;
+
+      int poll_ret = ::poll(&pfd, 1, static_cast<int>(remaining));
+      if (poll_ret < 0) {
+        if (errno == EINTR) continue;
+        break;  // error
+      }
+      if (poll_ret == 0) break;  // timeout
+
+      if (pfd.revents & (POLLIN | POLLHUP | POLLERR)) {
+        uint16_t recv_addr;
+        std::vector<uint8_t> apdu_data;
+
+        while (knxd_.poll_group_telegram(recv_addr, apdu_data)) {
+          cache_.update(recv_addr, apdu_data);
+
+          if (eib_addrs.find(recv_addr) != eib_addrs.end()) {
+            JsonBuilder resp;
+            resp.start_object();
+            resp.add_key("d");
+            resp.start_object();
+            auto cv_addr = KnxAddress{"KNX", KnxGroupAddress::from_eibaddr(recv_addr)};
+            resp.add_string(cv_addr.to_cometvisu(),
+                            hex_encode(apdu_data.data(), apdu_data.size()));
+            resp.end_object();
+            resp.add_string("i", generate_index());
+            resp.end_object();
+            result.body = resp.take();
+            return result;
+          }
+
+          long_poll_.notify(recv_addr, hex_encode(apdu_data.data(), apdu_data.size()));
+        }
+      }
+    }
+
+    // Long-poll timeout: return empty
     JsonBuilder resp;
     resp.start_object();
     resp.add_key("d");
@@ -146,7 +231,8 @@ ReadResult ReadHandler::handle(std::string_view query_string) {
     return result;
   }
 
-  // Non-long-poll: timeout provided
+  // ---- Non-long-poll: timeout provided ----
+  int t_val = *timeout;
   JsonBuilder json;
   json.start_object();
   json.add_key("d");
@@ -157,24 +243,21 @@ ReadResult ReadHandler::handle(std::string_view query_string) {
   for (auto addr : eib_addrs) {
     std::optional<std::vector<uint8_t>> data;
 
-    if (timeout > 0) {
-      // Try cache first
-      data = cache_.get(addr, timeout);
+    if (t_val > 0) {
+      data = cache_.get(addr, t_val);
       if (!data) {
-        // Read from knxd cache
         data = knxd_.cache_read(addr, true);
         if (data) {
           cache_.update(addr, *data);
         }
       }
-    } else if (timeout == 0) {
-      // Read from bus directly (knxd cache, blocking)
+    } else if (t_val == 0) {
       data = knxd_.cache_read(addr, false);
       if (data) {
         cache_.update(addr, *data);
       }
     } else {
-      // timeout < 0: cache only
+      // t_val < 0: cache only
       data = cache_.get_any(addr);
     }
 

@@ -70,6 +70,14 @@ void MockKnxdClient::set_telegram_callback(GroupTelegramCallback callback) {
   telegram_callback_ = std::move(callback);
 }
 
+int MockKnxdClient::get_fd() const {
+  return -1;  // mock has no real fd
+}
+
+void MockKnxdClient::set_nonblocking(bool /*enable*/) {
+  // no-op for mock
+}
+
 void MockKnxdClient::set_cached_value(uint16_t addr, const std::vector<uint8_t>& data) {
   cached_values_[addr] = data;
 }

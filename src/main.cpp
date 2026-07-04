@@ -40,6 +40,11 @@ int main() {
 
   // ---- Configuration ----
   const char* knxd_socket = get_env_default("KNXD_SOCKET", "/run/knx");
+  int longpoll_timeout = 60;
+  if (const char* lp = getenv("LONGPOLL_TIMEOUT_SEC")) {
+    longpoll_timeout = std::atoi(lp);
+    if (longpoll_timeout <= 0) longpoll_timeout = 60;
+  }
 
   // ---- Initialize components ----
   KnxdClient knxd;
@@ -53,6 +58,9 @@ int main() {
     std::cerr << "[ERROR] Cannot open group socket on knxd\n";
     return 1;
   }
+
+  // Set non-blocking mode for efficient poll()-based long-poll
+  knxd.set_nonblocking(true);
 
   SessionStore sessions;
   AddressCache cache;
@@ -68,7 +76,7 @@ int main() {
   });
 
   // ---- Create router and server ----
-  Router router(knxd, sessions, cache, long_poll);
+  Router router(knxd, sessions, cache, long_poll, longpoll_timeout);
 
   FcgiServer server;
   server.set_handler([&](const FcgiRequest& req) -> FcgiResponse { return router.route(req); });

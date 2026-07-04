@@ -20,10 +20,10 @@
 namespace cvknxd {
 
 Router::Router(KnxdClientInterface& knxd, SessionStore& sessions, AddressCache& cache,
-               LongPollManager& long_poll)
+               LongPollManager& long_poll, int longpoll_timeout_sec)
     : login_handler_(sessions),
-      read_handler_(knxd, cache, long_poll),
-      write_handler_(knxd, cache) {}
+      read_handler_(knxd, cache, long_poll, sessions, longpoll_timeout_sec),
+      write_handler_(knxd, cache, sessions) {}
 
 FcgiResponse Router::route(const FcgiRequest& request) {
   // Determine the endpoint from the path
