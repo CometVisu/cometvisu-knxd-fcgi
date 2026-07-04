@@ -29,8 +29,33 @@ using namespace cvknxd;
 ///
 /// NOTE: Unix socket creation requires unsandboxed execution. When running in
 /// the VS Code sandbox, FCGX_OpenSocket fails with EACCES. Tests that exercise
-/// successful listen() are in the integration test suite which requests
-/// unsandboxed access.
+/// successful listen() are in the integration test suite.
+
+/// Helper: temporarily redirect stderr to /dev/null.
+/// FCGX_OpenSocket prints error messages to stderr when it fails, which pollutes
+/// test output. This guard suppresses that noise.
+class StderrSuppressor {
+public:
+  StderrSuppressor() {
+    fflush(stderr);
+    old_ = dup(fileno(stderr));
+    auto* devnull = fopen("/dev/null", "w");
+    if (devnull != nullptr) {
+      dup2(fileno(devnull), fileno(stderr));
+      fclose(devnull);
+    }
+  }
+  ~StderrSuppressor() {
+    fflush(stderr);
+    if (old_ >= 0) {
+      dup2(old_, fileno(stderr));
+      close(old_);
+    }
+  }
+
+private:
+  int old_ = -1;
+};
 
 TEST(FcgiServerTest, NotListeningByDefault) {
   FcgiServer server;
@@ -44,13 +69,16 @@ TEST(FcgiServerTest, ListenRejectsEmptyPath) {
 }
 
 TEST(FcgiServerTest, ListenRejectsInvalidPath) {
+  // FCGX_OpenSocket prints "bind/listen: No such file or directory" to stderr
+  // when given a path in a non-existent directory. Suppress that noise.
+  StderrSuppressor suppress;
+
   FcgiServer server;
-  // A path in a non-existent directory should fail
   EXPECT_FALSE(server.listen("/nonexistent/path/fcgi.sock"));
   EXPECT_FALSE(server.is_listening());
 }
 
-TEST(FcgiServerTest, ListenStateResetAfterFailedCall) {
+TEST(FcgiServerTest, ListenStateRemainsNonListeningAfterFailedCall) {
   FcgiServer server;
   EXPECT_FALSE(server.listen(""));
   // A subsequent valid attempt should still work (no corrupted state)
