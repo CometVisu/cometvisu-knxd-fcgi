@@ -24,6 +24,7 @@
 #include "router/router.h"
 #include "state/session_store.h"
 #include "util/debug_log.h"
+#include "version.h"
 
 namespace {
 
@@ -53,8 +54,37 @@ int parse_env_int(const char* name, int default_val, int min_val, int max_val) {
 
 }  // namespace
 
-int main() {
+int main(int argc, char* argv[]) {
   using namespace cvknxd;
+
+  // Handle command-line flags when invoked directly (e.g., for version queries).
+  // FastCGI binaries can be run from a terminal for introspection without
+  // needing a running web server.
+  if (argc > 1) {
+    std::string_view arg = argv[1];
+    if (arg == "--version" || arg == "-v") {
+      std::cout << application_name() << " " << version() << "\n";
+      return 0;
+    }
+    if (arg == "--help" || arg == "-h") {
+      std::cout << application_name() << " " << version() << "\n"
+                << "FastCGI backend bridging CometVisu Protocol to knxd\n"
+                << "\n"
+                << "Usage: cometvisu-knxd-fcgi [OPTION]\n"
+                << "\n"
+                << "Options:\n"
+                << "  --version, -v   Print version information and exit\n"
+                << "  --help, -h      Print this help message and exit\n"
+                << "\n"
+                << "Environment variables:\n"
+                << "  KNXD_SOCKET           Path to the knxd Unix socket (default: /run/knx)\n"
+                << "  LONGPOLL_TIMEOUT_SEC  Max seconds to wait in long-poll /r (default: 300)\n"
+                << "  DEBUG_BACKEND         Set to 1 to enable debug logging to stderr\n"
+                << "\n"
+                << "When run without options, starts the FastCGI server loop.\n";
+      return 0;
+    }
+  }
 
   // ---- Debug mode ----
   // Enable via environment variable DEBUG_BACKEND=1 (or DEBUG_BACKEND=true/yes/on).

@@ -24,6 +24,15 @@ add_library(cvknxd_util STATIC
 target_include_directories(cvknxd_util PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
 target_link_libraries(cvknxd_util PUBLIC)
 
+# ---- Version library ----
+add_library(cvknxd_version STATIC
+    version.cpp
+)
+
+target_include_directories(cvknxd_version PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
+target_compile_definitions(cvknxd_version PUBLIC APP_VERSION="${PROJECT_VERSION}")
+target_link_libraries(cvknxd_version PUBLIC)
+
 # ---- knxd client library ----
 add_library(cvknxd_knxd STATIC
     knxd/knxd_protocol.cpp
@@ -74,6 +83,7 @@ add_executable(cometvisu-knxd-fcgi
 )
 
 target_link_libraries(cometvisu-knxd-fcgi PRIVATE
+    cvknxd_version
     cvknxd_fcgi
     cvknxd_router
     cvknxd_handlers

@@ -14,8 +14,13 @@
 # along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
 cmake_minimum_required(VERSION 3.20)
+
+# Read version from the VERSION file (single source of truth).
+file(STRINGS "${CMAKE_SOURCE_DIR}/VERSION" _version_text)
+string(STRIP "${_version_text}" PROJECT_VERSION_STRING)
+
 project(cometvisu-knxd-fcgi
-    VERSION 0.1.0
+    VERSION ${PROJECT_VERSION_STRING}
     DESCRIPTION "FastCGI backend bridging CometVisu Protocol to knxd"
     LANGUAGES CXX
 )
