@@ -1,0 +1,29 @@
+{
+  // ---- CMake Tools settings ----
+  "cmake.buildDirectory": "${workspaceFolder}/build",
+  "cmake.configureSettings": {
+    "CMAKE_BUILD_TYPE": "Debug",
+    "BUILD_TESTING": "ON"
+  },
+  "cmake.options.statusBarVisibility": "visible",
+  "cmake.generator": "Unix Makefiles",
+  "cmake.ctestPath": "ctest",
+  // ---- C/C++ settings ----
+  "C_Cpp.default.configurationProvider": "ms-vscode.cmake-tools",
+  "C_Cpp.clang_format_style": "file",
+  "C_Cpp.codeAnalysis.clangTidy.enabled": true,
+  "C_Cpp.codeAnalysis.clangTidy.useBuildPath": "${workspaceFolder}/build",
+  // ---- Editor settings ----
+  "editor.formatOnSave": true,
+  "editor.rulers": [
+    100
+  ],
+  "editor.tabSize": 8,
+  "editor.indentSize": 2,
+  "editor.insertSpaces": true,
+  "editor.detectIndentation": false,
+  "files.encoding": "utf8",
+  "files.eol": "\n",
+  // ---- Test settings ----
+  "testExplorer.useNativeTesting": true
+}

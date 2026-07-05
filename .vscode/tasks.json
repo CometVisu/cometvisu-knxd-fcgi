@@ -1,0 +1,172 @@
+{
+  "version": "2.0.0",
+  "tasks": [
+    {
+      "label": "cmake-configure",
+      "type": "shell",
+      "command": "cmake",
+      "args": [
+        "-B",
+        "build",
+        "-DCMAKE_BUILD_TYPE=Debug",
+        "-DBUILD_TESTING=ON"
+      ],
+      "group": "build",
+      "problemMatcher": [],
+      "detail": "Configure the CMake project (Debug, with tests)"
+    },
+    {
+      "label": "cmake-build",
+      "type": "shell",
+      "command": "cmake",
+      "args": [
+        "--build",
+        "build",
+        "-j",
+        "${nproc}"
+      ],
+      "group": {
+        "kind": "build",
+        "isDefault": true
+      },
+      "problemMatcher": [
+        "$gcc"
+      ],
+      "dependsOn": [
+        "cmake-configure"
+      ],
+      "detail": "Build the entire project (all targets)"
+    },
+    {
+      "label": "cmake-build-main",
+      "type": "shell",
+      "command": "cmake",
+      "args": [
+        "--build",
+        "build",
+        "-j",
+        "${nproc}",
+        "--target",
+        "cometvisu-knxd-fcgi"
+      ],
+      "group": "build",
+      "problemMatcher": [
+        "$gcc"
+      ],
+      "dependsOn": [
+        "cmake-configure"
+      ],
+      "detail": "Build only the main executable"
+    },
+    {
+      "label": "cmake-test",
+      "type": "shell",
+      "command": "ctest",
+      "args": [
+        "--test-dir",
+        "build",
+        "--output-on-failure"
+      ],
+      "group": {
+        "kind": "test",
+        "isDefault": true
+      },
+      "problemMatcher": [],
+      "dependsOn": [
+        "cmake-build"
+      ],
+      "detail": "Run all tests via CTest"
+    },
+    {
+      "label": "cmake-test-unit",
+      "type": "shell",
+      "command": "ctest",
+      "args": [
+        "--test-dir",
+        "build",
+        "--output-on-failure",
+        "-R",
+        "^test_"
+      ],
+      "group": "test",
+      "problemMatcher": [],
+      "dependsOn": [
+        "cmake-build"
+      ],
+      "detail": "Run only unit tests (test_*)"
+    },
+    {
+      "label": "cmake-test-specific",
+      "type": "shell",
+      "command": "ctest",
+      "args": [
+        "--test-dir",
+        "build",
+        "--output-on-failure",
+        "-R",
+        "${input:testName}"
+      ],
+      "group": "test",
+      "problemMatcher": [],
+      "dependsOn": [
+        "cmake-build"
+      ],
+      "detail": "Run a specific test by name pattern"
+    },
+    {
+      "label": "cmake-clean",
+      "type": "shell",
+      "command": "cmake",
+      "args": [
+        "--build",
+        "build",
+        "--target",
+        "clean"
+      ],
+      "group": "build",
+      "problemMatcher": [],
+      "detail": "Clean all build artifacts"
+    },
+    {
+      "label": "cmake-rebuild",
+      "type": "shell",
+      "command": "cmake",
+      "args": [
+        "--build",
+        "build",
+        "--clean-first",
+        "-j",
+        "${nproc}"
+      ],
+      "group": "build",
+      "problemMatcher": [
+        "$gcc"
+      ],
+      "dependsOn": [
+        "cmake-configure"
+      ],
+      "detail": "Clean rebuild of the entire project"
+    },
+    {
+      "label": "cmake-reconfigure",
+      "type": "shell",
+      "command": "cmake",
+      "args": [
+        "-B",
+        "build",
+        "-DCMAKE_BUILD_TYPE=Debug",
+        "-DBUILD_TESTING=ON"
+      ],
+      "group": "build",
+      "problemMatcher": [],
+      "detail": "Reconfigure from scratch (removes CMakeCache.txt first)"
+    }
+  ],
+  "inputs": [
+    {
+      "id": "testName",
+      "type": "promptString",
+      "description": "Enter a test name pattern (regex) to run (e.g. test_hex, test_query_string)"
+    }
+  ]
+}
