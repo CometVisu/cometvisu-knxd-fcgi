@@ -72,25 +72,23 @@ protected:
   }
 
   std::string a(int sub) const {
-    return "KNX:" + KnxGroupAddress::from_eibaddr(
-        static_cast<uint16_t>(base_ + sub)).to_string();
+    return "KNX:" + KnxGroupAddress::from_eibaddr(static_cast<uint16_t>(base_ + sub)).to_string();
   }
   uint16_t e(int sub) const { return static_cast<uint16_t>(base_ + sub); }
-  std::string k(int sub) const {
-    return KnxGroupAddress::from_eibaddr(e(sub)).to_string();
-  }
+  std::string k(int sub) const { return KnxGroupAddress::from_eibaddr(e(sub)).to_string(); }
 
   static std::string sid(const std::string& json) {
     auto s = json.find("\"s\":\"");
-    if (s == std::string::npos) return "";
+    if (s == std::string::npos)
+      return "";
     s += 5;
     auto e = json.find('"', s);
     return (e == std::string::npos) ? "" : json.substr(s, e - s);
   }
 
   void inject(int sub, int value) {
-    std::string cmd = "knxtool groupswrite local:" + knxd_socket_path_ + " " +
-                      k(sub) + " " + std::to_string(value) + " 2>/dev/null";
+    std::string cmd = "knxtool groupswrite local:" + knxd_socket_path_ + " " + k(sub) + " " +
+                      std::to_string(value) + " 2>/dev/null";
     (void)std::system(cmd.c_str());
     std::this_thread::sleep_for(std::chrono::milliseconds(80));
   }
@@ -158,8 +156,7 @@ TEST_F(RealKnxdE2ETest, WriteMultiByte) {
 
 TEST_F(RealKnxdE2ETest, WriteMultipleAddresses) {
   Router router(knxd_, sessions_);
-  EXPECT_EQ(router.route(req("GET", "/w",
-      "a=" + a(3) + "&a=" + a(4) + "&v=01")).status_code, 200);
+  EXPECT_EQ(router.route(req("GET", "/w", "a=" + a(3) + "&a=" + a(4) + "&v=01")).status_code, 200);
 }
 
 // ---- Read with timeout — returns 200 (empty on virtual bus) ----
@@ -189,9 +186,7 @@ TEST_F(RealKnxdE2ETest, CometLongPollReceivesInjectedTelegram) {
   std::promise<FcgiResponse> p;
   auto f = p.get_future();
 
-  std::thread reader([&]() {
-    p.set_value(router.route(req("GET", "/r", "a=" + target)));
-  });
+  std::thread reader([&]() { p.set_value(router.route(req("GET", "/r", "a=" + target))); });
 
   std::this_thread::sleep_for(std::chrono::milliseconds(200));
   inject(7, 2);
@@ -204,8 +199,7 @@ TEST_F(RealKnxdE2ETest, CometLongPollReceivesInjectedTelegram) {
 
   EXPECT_EQ(resp.status_code, 200);
   EXPECT_NE(resp.body.find(target), std::string::npos);
-  EXPECT_NE(resp.body.find(hex(2)), std::string::npos)
-      << "Must contain APDU hex " << hex(2);
+  EXPECT_NE(resp.body.find(hex(2)), std::string::npos) << "Must contain APDU hex " << hex(2);
 }
 
 TEST_F(RealKnxdE2ETest, CometLongPollSkipsNonMatchingTelegram) {
@@ -215,9 +209,7 @@ TEST_F(RealKnxdE2ETest, CometLongPollSkipsNonMatchingTelegram) {
   std::promise<FcgiResponse> p;
   auto f = p.get_future();
 
-  std::thread reader([&]() {
-    p.set_value(router.route(req("GET", "/r", "a=" + target)));
-  });
+  std::thread reader([&]() { p.set_value(router.route(req("GET", "/r", "a=" + target))); });
 
   std::this_thread::sleep_for(std::chrono::milliseconds(200));
 
@@ -243,7 +235,8 @@ TEST_F(RealKnxdE2ETest, CometLongPollTimeoutReturnsEmpty) {
   auto start = std::chrono::steady_clock::now();
   auto resp = router.route(req("GET", "/r", "a=" + a(10)));
   auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
-      std::chrono::steady_clock::now() - start).count();
+                     std::chrono::steady_clock::now() - start)
+                     .count();
 
   EXPECT_EQ(resp.status_code, 200);
   EXPECT_NE(resp.body.find("\"d\":{}"), std::string::npos);
@@ -282,8 +275,7 @@ TEST_F(RealKnxdE2ETest, RouterUnknownEndpointReturns404) {
 
 TEST_F(RealKnxdE2ETest, InvalidSessionReturns401) {
   Router router(knxd_, sessions_);
-  EXPECT_EQ(router.route(req("GET", "/r",
-      "a=" + a(13) + "&t=30&s=bad")).status_code, 401);
+  EXPECT_EQ(router.route(req("GET", "/r", "a=" + a(13) + "&t=30&s=bad")).status_code, 401);
 }
 
 TEST_F(RealKnxdE2ETest, ValidSessionAllowsWrite) {
@@ -293,15 +285,13 @@ TEST_F(RealKnxdE2ETest, ValidSessionAllowsWrite) {
   std::string s = sid(lr.body);
   ASSERT_FALSE(s.empty());
 
-  EXPECT_EQ(router.route(req("GET", "/w",
-      "a=" + a(14) + "&v=7e&s=" + s)).status_code, 200);
+  EXPECT_EQ(router.route(req("GET", "/w", "a=" + a(14) + "&v=7e&s=" + s)).status_code, 200);
 }
 
 TEST_F(RealKnxdE2ETest, AnonymousSessionAllowsRead) {
   // Short timeout — cache miss falls through to COMET poll
   Router router(knxd_, sessions_, 2);
-  auto resp = router.route(req("GET", "/r",
-      "a=" + a(15) + "&t=30&s=0"));
+  auto resp = router.route(req("GET", "/r", "a=" + a(15) + "&t=30&s=0"));
   EXPECT_EQ(resp.status_code, 200);
 }
 
@@ -314,6 +304,5 @@ TEST_F(RealKnxdE2ETest, ReadMissingAddressReturns400) {
 
 TEST_F(RealKnxdE2ETest, ReadInvalidTimeoutReturns400) {
   Router router(knxd_, sessions_);
-  EXPECT_EQ(router.route(req("GET", "/r",
-      "a=" + a(16) + "&t=abc")).status_code, 400);
+  EXPECT_EQ(router.route(req("GET", "/r", "a=" + a(16) + "&t=abc")).status_code, 400);
 }
