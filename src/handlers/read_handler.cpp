@@ -104,13 +104,13 @@ ReadResult ReadHandler::handle(std::string_view query_string) {
 
   // ---- Long-poll mode: no timeout parameter ----
   if (!timeout.has_value()) {
-    // ---- Efficient poll-based wait on knxd socket ----
-    int knxd_fd = knxd_.get_fd();
-    if (knxd_fd < 0) {
-      // No real fd (e.g., mock): fall back to quick poll
+    // ---- Drain any telegrams already buffered (shared by mock and real paths) ----
+    // These may have arrived during open_group_socket() or previous cache_read()
+    // calls and sit in the application-level read buffer, invisible to poll().
+    {
       uint16_t recv_addr;
       std::vector<uint8_t> apdu_data;
-      if (knxd_.poll_group_telegram(recv_addr, apdu_data)) {
+      while (knxd_.poll_group_telegram(recv_addr, apdu_data)) {
         if (eib_addrs.find(recv_addr) != eib_addrs.end()) {
           JsonBuilder resp;
           resp.start_object();
@@ -125,7 +125,13 @@ ReadResult ReadHandler::handle(std::string_view query_string) {
           return result;
         }
       }
-      // Timeout with no data
+    }
+
+    // ---- Check if we have a real socket fd for poll() ----
+    int knxd_fd = knxd_.get_fd();
+    if (knxd_fd < 0) {
+      // No real fd (e.g., mock): buffered data already drained above,
+      // no match found — return empty immediately.
       JsonBuilder resp;
       resp.start_object();
       resp.add_key("d");
@@ -137,7 +143,7 @@ ReadResult ReadHandler::handle(std::string_view query_string) {
       return result;
     }
 
-    // Use poll() on the knxd socket — efficient, no CPU burning
+    // ---- Efficient poll-based wait on knxd socket ----
     auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(longpoll_timeout_sec_);
 
     while (true) {
@@ -161,14 +167,16 @@ ReadResult ReadHandler::handle(std::string_view query_string) {
       if (poll_ret == 0)
         break;  // timeout
 
+      // Check for hangup or error before processing data
+      if (pfd.revents & (POLLHUP | POLLERR)) {
+        break;
+      }
+
       if (pfd.revents & POLLIN) {
         uint16_t recv_addr;
         std::vector<uint8_t> apdu_data;
 
         while (knxd_.poll_group_telegram(recv_addr, apdu_data)) {
-          // cache_.update() and long-poll notify are handled by the
-          // telegram callback invoked inside poll_group_telegram()
-
           if (eib_addrs.find(recv_addr) != eib_addrs.end()) {
             JsonBuilder resp;
             resp.start_object();
@@ -183,11 +191,6 @@ ReadResult ReadHandler::handle(std::string_view query_string) {
             return result;
           }
         }
-      }
-
-      // Handle disconnect/error — avoid tight spin loop
-      if (pfd.revents & (POLLHUP | POLLERR)) {
-        break;
       }
     }
 

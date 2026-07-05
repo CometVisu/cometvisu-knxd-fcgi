@@ -105,6 +105,47 @@ TEST_F(ReadHandlerTest, LongPollGetsTelegram) {
   EXPECT_NE(result.body.find("42"), std::string::npos);
 }
 
+TEST_F(ReadHandlerTest, LongPollSkipsNonMatchingBufferedTelegram) {
+  ReadHandler handler(knxd_, sessions_);
+
+  // Enqueue a non-matching telegram first, then a matching one.
+  // This simulates what happens when open_group_socket() leaves
+  // telegrams in the read buffer: the first one doesn't match the
+  // requested address, but a later one does. The long-poll handler
+  // MUST drain all buffered telegrams, not just check the first.
+  knxd_.enqueue_telegram(0x0B04, {0x00, 0x80, 0x0C, 0x6F});  // 1/3/4 — non-matching
+  knxd_.enqueue_telegram(0x0A03, {0x00, 0x80, 0x42});        // 1/2/3 — matching
+
+  // Long-poll (no timeout parameter)
+  auto result = handler.handle("a=KNX:1/2/3");
+
+  EXPECT_EQ(result.http_status, 200);
+  EXPECT_NE(result.body.find("KNX:1/2/3"), std::string::npos);
+  EXPECT_NE(result.body.find("42"), std::string::npos);
+}
+
+TEST_F(ReadHandlerTest, LongPollDrainsAllBufferedWhenNoMatch) {
+  ReadHandler handler(knxd_, sessions_);
+
+  // Enqueue only non-matching telegrams — the handler should drain
+  // them all and then return empty (no match found).
+  knxd_.enqueue_telegram(0x0B04, {0x00, 0x80, 0x0C, 0x6F});  // 1/3/4
+  knxd_.enqueue_telegram(0x0C05, {0x00, 0x80, 0x01});        // 1/4/5
+
+  auto result = handler.handle("a=KNX:1/2/3");
+
+  EXPECT_EQ(result.http_status, 200);
+  // Should have empty "d" object and an index
+  EXPECT_NE(result.body.find("\"d\":{}"), std::string::npos);
+  EXPECT_NE(result.body.find("\"i\":\""), std::string::npos);
+
+  // Verify all telegrams were consumed by the drain loop
+  uint16_t addr;
+  std::vector<uint8_t> apdu;
+  EXPECT_FALSE(knxd_.poll_group_telegram(addr, apdu))
+      << "Expected all buffered telegrams to be drained";
+}
+
 TEST_F(ReadHandlerTest, IndexIncluded) {
   ReadHandler handler(knxd_, sessions_);
 
