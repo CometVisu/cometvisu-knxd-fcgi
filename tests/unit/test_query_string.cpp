@@ -109,29 +109,49 @@ TEST(QueryStringTest, ParameterCountLimit) {
 }
 
 TEST(QueryStringTest, ValueCountPerKeyLimit) {
-  // Many values for a single key
+  // Build more values than kMaxValuesPerKey (250)
   std::string q;
-  for (int i = 0; i < 150; ++i) {
+  for (int i = 0; i < 300; ++i) {
     if (i > 0) q += '&';
     q += "a=v" + std::to_string(i);
   }
+
   QueryString qs(q);
   auto all = qs.get_all("a");
-  // Should cap at kMaxValuesPerKey (128)
-  EXPECT_LE(all.size(), 128);
-  EXPECT_EQ(all[0], "v0");
+
+  // Should stop exactly at kMaxValuesPerKey (250)
+  ASSERT_EQ(all.size(), 250);
+  EXPECT_EQ(all.front(), "v0");
+  EXPECT_EQ(all.back(), "v249");
 }
 
 TEST(QueryStringTest, TotalParamCountLimit) {
-  // Many identical params — tests the total pair count limit
+  // Use two keys so the total pair limit (256) is reached before
+  // the per-key limit (250).
   std::string q;
-  for (int i = 0; i < 200; ++i) {
+  for (int i = 0; i < 300; ++i) {
     if (i > 0) q += '&';
-    q += "a=v" + std::to_string(i);
+
+    const char* key = (i % 2 == 0) ? "a" : "b";
+    q += std::string(key) + "=v" + std::to_string(i);
   }
+
   QueryString qs(q);
-  // Should still parse without crash, capping at kMaxTotalPairs (200)
-  EXPECT_EQ(qs.size(), 1);  // single key "a"
-  auto all = qs.get_all("a");
-  EXPECT_LE(all.size(), 128);  // capped per key
+
+  EXPECT_EQ(qs.size(), 2);
+
+  auto a = qs.get_all("a");
+  auto b = qs.get_all("b");
+
+  // Exactly kMaxTotalPairs (256) values should be retained.
+  EXPECT_EQ(a.size() + b.size(), 256);
+
+  // With alternating keys, both receive 128 values.
+  ASSERT_EQ(a.size(), 128);
+  ASSERT_EQ(b.size(), 128);
+
+  EXPECT_EQ(a.front(), "v0");
+  EXPECT_EQ(a.back(), "v254");
+  EXPECT_EQ(b.front(), "v1");
+  EXPECT_EQ(b.back(), "v255");
 }
