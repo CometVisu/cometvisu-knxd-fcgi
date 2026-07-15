@@ -92,6 +92,8 @@ int main(int argc, char* argv[]) {
           << "  LONGPOLL_TIMEOUT_SEC  Max seconds to wait in long-poll /r (default: 300)\n"
           << "  ADDRESS_PREFIX        Namespace prefix for addresses without explicit prefix\n"
           << "                        (default: empty = no prefix, e.g. set to \"KNX\")\n"
+          << "  BASE_URL              URL prefix advertised in login response (unset = omitted)\n"
+          << "                        (default: not set, e.g. /proxy/visu)\n"
           << "  DEBUG_BACKEND         Set to 1 to enable debug logging to stderr\n"
           << "\n"
           << "When run without options, starts the FastCGI server loop.\n";
@@ -123,6 +125,30 @@ int main(int argc, char* argv[]) {
   const char* address_prefix = get_env_default("ADDRESS_PREFIX", "");
   KnxAddress::set_default_namespace(address_prefix);
 
+  // ---- Base URL for login response ----
+  // When set, the /l endpoint includes a "c" object with "baseURL" set to this value.
+  const char* base_url = getenv("BASE_URL");
+
+  // ---- Optional direct socket (standalone mode) ----
+  // Set FCGI_SOCKET to a TCP port (":9000") or Unix socket path to run without
+  // spawn-fcgi. Read early so startup info can show it.
+  const char* fcgi_socket = get_env_default("FCGI_SOCKET", "");
+
+  // ---- Startup info ----
+  std::cout << "[INFO] cometvisu-knxd-fcgi " << version() << " starting\n";
+  std::cout << "[INFO] Configuration:\n";
+  std::cout << "[INFO]   KNXD_SOCKET           " << knxd_socket << "\n";
+  std::cout << "[INFO]   FCGI_SOCKET           "
+            << (fcgi_socket[0] != '\0' ? fcgi_socket : "(not set, spawn-fcgi mode)") << "\n";
+  std::cout << "[INFO]   FCGI_WORKERS          " << num_workers << "\n";
+  std::cout << "[INFO]   LONGPOLL_TIMEOUT_SEC  " << longpoll_timeout << "\n";
+  std::cout << "[INFO]   ADDRESS_PREFIX        "
+            << (address_prefix[0] != '\0' ? address_prefix : "(not set)") << "\n";
+  std::cout << "[INFO]   BASE_URL              "
+            << (base_url != nullptr && base_url[0] != '\0' ? base_url : "(not set)") << "\n";
+  std::cout << "[INFO]   DEBUG_BACKEND         "
+            << (getenv("DEBUG_BACKEND") != nullptr ? getenv("DEBUG_BACKEND") : "(not set)") << "\n";
+
   // ---- Initialize components ----
   KnxdClient knxd;
   if (!knxd.connect(knxd_socket)) {
@@ -152,7 +178,6 @@ int main(int argc, char* argv[]) {
   // Set FCGI_SOCKET to a TCP port (":9000") or Unix socket path to run without
   // spawn-fcgi. When unset, the server uses the standard FCGI stdin/stdout
   // stream set up by spawn-fcgi or the web server.
-  const char* fcgi_socket = get_env_default("FCGI_SOCKET", "");
   if (fcgi_socket[0] != '\0') {
     if (server.listen(fcgi_socket)) {
       std::cout << "[INFO] Direct FCGI socket: " << fcgi_socket << "\n";
@@ -162,8 +187,6 @@ int main(int argc, char* argv[]) {
       return 1;
     }
   }
-
-  std::cout << "[INFO] cometvisu-knxd-fcgi starting, knxd socket: " << knxd_socket << "\n";
 
   // ---- Run ----
   int result = 0;
