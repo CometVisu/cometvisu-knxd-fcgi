@@ -26,10 +26,14 @@ class SessionStore;
 /// Handles CometVisu login requests: GET /l?u=USER&p=PASSWORD&d=DEVICE
 class LoginHandler {
 public:
-  /// @param sessions   Session store
-  /// @param base_url   Base URL prefix advertised in login response "c" block
-  ///                   (e.g. "/proxy/visu"). Empty = omit "c" block entirely.
-  explicit LoginHandler(SessionStore& sessions, std::string base_url = "");
+  /// @param sessions       Session store
+  /// @param base_url       Base URL prefix advertised in login response "c" block
+  ///                       (e.g. "/proxy/visu"). Empty = omit "c" block entirely.
+  /// @param knxd_binary    Path to the knxd binary for runtime version query.
+  ///                       Default: "knxd" (lookup in PATH). Set to e.g.
+  ///                       "/usr/local/bin/knxd" if knxd is not in PATH.
+  explicit LoginHandler(SessionStore& sessions, std::string base_url = "",
+                        std::string knxd_binary = "knxd");
 
   ~LoginHandler() = default;
 
@@ -45,15 +49,16 @@ public:
   [[nodiscard]] std::string handle(std::string_view query_string);
 
 private:
-  SessionStore& sessions_;      // NOLINT(cppcoreguidelines-avoid-const-or-ref-data-members)
-  const std::string base_url_;  // NOLINT(cppcoreguidelines-avoid-const-or-ref-data-members)
+  SessionStore& sessions_;         // NOLINT(cppcoreguidelines-avoid-const-or-ref-data-members)
+  const std::string base_url_;     // NOLINT(cppcoreguidelines-avoid-const-or-ref-data-members)
+  const std::string knxd_binary_;  // NOLINT(cppcoreguidelines-avoid-const-or-ref-data-members)
 
   /// Cached knxd runtime version. Populated on first /l request by running
   /// `knxd --version`. Empty if knxd is not installed or the call fails.
   std::string cached_knxd_runtime_;
 
-  /// Run `knxd --version` and extract the version string.
-  [[nodiscard]] static std::string query_knxd_version();
+  /// Run `<knxd_binary> --version` and extract the version string.
+  [[nodiscard]] static std::string query_knxd_version(const std::string& binary);
 };
 
 }  // namespace cvknxd

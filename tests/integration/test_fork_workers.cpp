@@ -75,7 +75,7 @@ bool sockets_available() {
   if (s < 0) {
     return false;
   }
-  struct sockaddr_un addr{};
+  struct sockaddr_un addr {};
   addr.sun_family = AF_UNIX;
   size_t path_len = path.copy(addr.sun_path, sizeof(addr.sun_path) - 1);
   addr.sun_path[path_len] = '\0';
@@ -93,7 +93,7 @@ int connect_with_retry(const std::string& path, int max_retries, int delay_ms) {
     if (fd < 0)
       return -1;
 
-    struct sockaddr_un addr{};
+    struct sockaddr_un addr {};
     addr.sun_family = AF_UNIX;
     size_t path_len = path.copy(addr.sun_path, sizeof(addr.sun_path) - 1);
     addr.sun_path[path_len] = '\0';
@@ -234,19 +234,42 @@ TEST_F(ForkWorkerTest, ForkedWorkersAcceptConnections) {
 
   // Connect multiple times — each connection should be accepted by one
   // of the forked workers. The OS serializes accept() across processes.
+  //
+  // Send valid minimal FCGI frames (BEGIN_REQUEST + empty PARAMS) instead
+  // of plain data.  Sending raw bytes like "ping" causes FCGX_Accept_r()
+  // to enter an internal error-handling loop that may hang indefinitely
+  // depending on the compiler's code generation and libfcgi version.
   constexpr int kConnections = 4;
   for (int i = 0; i < kConnections; ++i) {
     int fd = connect_with_retry(socket_path_, 10, 50);
     ASSERT_GE(fd, 0) << "Failed to connect to listen socket on attempt " << i << " of "
                      << kConnections;
 
-    // Verify we can write to the socket (connection is fully established)
-    const char ping[] = "ping";
-    ssize_t written = ::write(fd, ping, sizeof(ping));
-    // Workers are blocked in FCGX_Accept_r which reads FCGI frames,
-    // so a plain write may fail or succeed depending on timing.
-    // The important thing is the connect succeeded.
-    (void)written;  // best-effort, not asserted
+    // Send a minimal valid FCGI request: BEGIN_REQUEST + empty PARAMS
+    constexpr unsigned char kBeginRequest[] = {
+        // FCGI header — BEGIN_REQUEST
+        1,     // version = FCGI_VERSION_1
+        1,     // type = FCGI_BEGIN_REQUEST
+        0, 1,  // requestId = 1
+        0, 8,  // contentLength = 8
+        0,     // paddingLength
+        0,     // reserved
+        // FCGI_BeginRequestBody
+        0, 1,          // role = FCGI_RESPONDER
+        0,             // flags
+        0, 0, 0, 0, 0  // reserved[5]
+    };
+    constexpr unsigned char kEmptyParams[] = {
+        // FCGI header — PARAMS (empty = end of params)
+        1,     // version = FCGI_VERSION_1
+        4,     // type = FCGI_PARAMS
+        0, 1,  // requestId = 1
+        0, 0,  // contentLength = 0
+        0,     // paddingLength
+        0      // reserved
+    };
+    ::write(fd, kBeginRequest, sizeof(kBeginRequest));
+    ::write(fd, kEmptyParams, sizeof(kEmptyParams));
 
     ::shutdown(fd, SHUT_RDWR);
     ::close(fd);

@@ -29,14 +29,15 @@ namespace cvknxd {
 /// This is the wire-protocol version, not the software version.
 static constexpr std::string_view kProtocolVersion = "0.0.2";
 
-LoginHandler::LoginHandler(SessionStore& sessions, std::string base_url)
-    : sessions_(sessions), base_url_(std::move(base_url)) {}
+LoginHandler::LoginHandler(SessionStore& sessions, std::string base_url, std::string knxd_binary)
+    : sessions_(sessions), base_url_(std::move(base_url)), knxd_binary_(std::move(knxd_binary)) {}
 
-std::string LoginHandler::query_knxd_version() {
-  // Run `knxd --version` and return its raw output (trimmed).
+std::string LoginHandler::query_knxd_version(const std::string& binary) {
+  // Run `<binary> --version` and return its raw output (trimmed).
   // knxd may print version info to stderr, so merge both streams.
   // NOLINTNEXTLINE(cert-env33-c)
-  FILE* pipe = popen("knxd --version 2>&1", "r");  // NOLINT(cert-env33-c)
+  const std::string cmd = binary + " --version 2>&1";
+  FILE* pipe = popen(cmd.c_str(), "r");  // NOLINT(cert-env33-c)
   if (pipe == nullptr) {
     return "";
   }
@@ -87,7 +88,7 @@ std::string LoginHandler::handle(std::string_view query_string) {
   }
 
   if (cached_knxd_runtime_.empty()) {
-    cached_knxd_runtime_ = query_knxd_version();
+    cached_knxd_runtime_ = query_knxd_version(knxd_binary_);
   }
   if (!cached_knxd_runtime_.empty()) {
     need_config = true;
