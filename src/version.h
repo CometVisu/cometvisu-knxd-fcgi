@@ -25,4 +25,16 @@ std::string_view version();
 /// Returns the application name ("cometvisu-knxd-fcgi").
 std::string_view application_name();
 
+/// Returns the git hash at compile time (e.g., "357f004").
+/// Returns "unknown" if the git hash could not be determined.
+std::string_view git_hash();
+
+/// Returns the knxd version at compile time (e.g., "0.14.57").
+/// Returns an empty string if the knxd version could not be determined.
+std::string_view knxd_build_version();
+
+/// Returns the knxd git hash at compile time (e.g., "a1b2c3d").
+/// Returns an empty string if the knxd git hash could not be determined.
+std::string_view knxd_build_git_hash();
+
 }  // namespace cvknxd

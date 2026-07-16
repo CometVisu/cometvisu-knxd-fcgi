@@ -115,11 +115,14 @@ TEST(LoginHandlerTest, DifferentSessionsAreUnique) {
 }
 
 TEST(LoginHandlerTest, ConfigBlockAbsentWhenNoUrlPath) {
+  // The "c" block now always appears (version info), but "baseURL" is absent
+  // when no base_url was given.
   SessionStore sessions;
   LoginHandler handler(sessions);  // default base_url = ""
 
   std::string response = handler.handle("");
-  EXPECT_EQ(response.find("\"c\""), std::string::npos);
+  EXPECT_NE(response.find("\"c\""), std::string::npos);
+  EXPECT_EQ(response.find("\"baseURL\""), std::string::npos);
 }
 
 TEST(LoginHandlerTest, ConfigBlockPresentWhenUrlPathSet) {
@@ -141,11 +144,13 @@ TEST(LoginHandlerTest, ConfigBlockWithCustomUrlPath) {
 }
 
 TEST(LoginHandlerTest, ConfigBlockIgnoredWhenUrlPathEmpty) {
+  // The "c" block appears (version info), but "baseURL" is absent.
   SessionStore sessions;
   LoginHandler handler(sessions, "");
 
   std::string response = handler.handle("");
-  EXPECT_EQ(response.find("\"c\""), std::string::npos);
+  EXPECT_NE(response.find("\"c\""), std::string::npos);
+  EXPECT_EQ(response.find("\"baseURL\""), std::string::npos);
 }
 
 // ============================================================================
@@ -169,9 +174,11 @@ TEST(LoginHandlerTest, ConfigBlockNotReadFromEnvironment) {
   SessionStore sessions;
   LoginHandler handler(sessions);  // default base_url = ""
 
-  // The "c" block must NOT appear — handler must NOT read getenv().
+  // The "c" block appears (version info), but "baseURL" must NOT be
+  // present — handler must NOT read getenv("BASE_URL").
   std::string response = handler.handle("");
-  EXPECT_EQ(response.find("\"c\""), std::string::npos);
+  EXPECT_NE(response.find("\"c\""), std::string::npos);
+  EXPECT_EQ(response.find("\"baseURL\""), std::string::npos);
 }
 
 TEST(LoginHandlerTest, ConfigBlockRequiresExplicitInjectionNotEnvVar) {
@@ -185,4 +192,42 @@ TEST(LoginHandlerTest, ConfigBlockRequiresExplicitInjectionNotEnvVar) {
   std::string response = handler.handle("");
   EXPECT_NE(response.find("\"baseURL\":\"/explicit/prefix\""), std::string::npos);
   EXPECT_EQ(response.find("/secret/prefix"), std::string::npos);
+}
+
+// ============================================================================
+// Version info in the "c" block — always included when available
+// ============================================================================
+
+TEST(LoginHandlerTest, ConfigBlockIncludesVersionInfo) {
+  // Version info is included even without baseURL.
+  // The compile-time values come from the build system; runtime from popen.
+  SessionStore sessions;
+  LoginHandler handler(sessions);  // no base_url
+
+  std::string response = handler.handle("");
+  EXPECT_NE(response.find("\"c\""), std::string::npos);
+  EXPECT_NE(response.find("\"fcgiVersion\":"), std::string::npos);
+  EXPECT_NE(response.find("\"fcgiGitHash\":"), std::string::npos);
+}
+
+TEST(LoginHandlerTest, ConfigBlockWithBaseUrlIncludesVersionInfo) {
+  // When base_url is set, baseURL and all version keys are present.
+  SessionStore sessions;
+  LoginHandler handler(sessions, "/proxy/visu");
+
+  std::string response = handler.handle("");
+  EXPECT_NE(response.find("\"baseURL\":\"/proxy/visu\""), std::string::npos);
+  EXPECT_NE(response.find("\"fcgiVersion\":"), std::string::npos);
+  EXPECT_NE(response.find("\"fcgiGitHash\":"), std::string::npos);
+}
+
+TEST(LoginHandlerTest, KnxdRuntimeVersionIsCached) {
+  // The runtime knxd version is queried via popen("knxd --version").
+  // Test that subsequent calls produce identical output (cached).
+  SessionStore sessions;
+  LoginHandler handler(sessions);
+
+  std::string r1 = handler.handle("");
+  std::string r2 = handler.handle("");
+  EXPECT_EQ(r1, r2);  // identical output (cached)
 }

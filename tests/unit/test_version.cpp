@@ -30,3 +30,32 @@ TEST(VersionTest, ApplicationName) {
 TEST(VersionTest, VersionStringNotEmpty) {
   EXPECT_FALSE(version().empty());
 }
+
+TEST(VersionTest, GitHashNotEmpty) {
+  EXPECT_FALSE(git_hash().empty());
+}
+
+TEST(VersionTest, GitHashIsShortHash) {
+  // git short hash is typically 7 hex chars
+  std::string_view hash = git_hash();
+  if (hash != "unknown") {
+    EXPECT_GE(hash.size(), 7);
+    EXPECT_LE(hash.size(), 8);
+  }
+}
+
+TEST(VersionTest, KnxdBuildVersionIsEmptyOrValid) {
+  // knxd_build_version may be empty (not available) or a valid version string
+  std::string_view v = knxd_build_version();
+  if (!v.empty()) {
+    EXPECT_NE(v.find('.'), std::string_view::npos);  // should contain a dot
+  }
+}
+
+TEST(VersionTest, KnxdBuildGitHashIsEmptyOrValid) {
+  // knxd_build_git_hash is typically empty or a short hash
+  std::string_view hash = knxd_build_git_hash();
+  if (!hash.empty()) {
+    EXPECT_GE(hash.size(), 7);
+  }
+}

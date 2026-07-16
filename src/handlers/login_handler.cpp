@@ -15,21 +15,44 @@
 
 #include "login_handler.h"
 
+#include <algorithm>
+#include <cstdio>
+
 #include "state/session_store.h"
 #include "util/json_builder.h"
 #include "util/query_string.h"
+#include "version.h"
 
 namespace cvknxd {
 
 LoginHandler::LoginHandler(SessionStore& sessions, std::string base_url)
     : sessions_(sessions), base_url_(std::move(base_url)) {}
 
+std::string LoginHandler::query_knxd_version() {
+  // Run `knxd --version` and return its raw output (trimmed).
+  // knxd may print version info to stderr, so merge both streams.
+  FILE* pipe = popen("knxd --version 2>&1", "r");
+  if (!pipe)
+    return "";
+
+  char buf[256];
+  std::string output;
+  while (std::fgets(buf, sizeof(buf), pipe) != nullptr) {
+    output += buf;
+  }
+  pclose(pipe);
+
+  // Trim trailing whitespace / newlines
+  while (!output.empty() && (output.back() == '\n' || output.back() == '\r')) {
+    output.pop_back();
+  }
+  return output;
+}
+
 std::string LoginHandler::handle(std::string_view query_string) {
   QueryString params{query_string};
 
-  // Check if anonymous session
   bool anonymous = !params.has("u") && !params.has("p");
-
   std::string session_id = sessions_.create_session(anonymous);
 
   JsonBuilder json;
@@ -37,11 +60,52 @@ std::string LoginHandler::handle(std::string_view query_string) {
   json.add_string("v", "0.0.2");
   json.add_string("s", session_id);
 
-  // Include configuration block when BASE_URL is set
-  if (!base_url_.empty()) {
+  // Gather version info (compile-time + runtime, lazy cached)
+  bool need_config = !base_url_.empty();
+  std::string fcgi_ver(version());
+  std::string fcgi_hash(git_hash());
+  std::string knxd_bver(knxd_build_version());
+  std::string knxd_bhash(knxd_build_git_hash());
+
+  if (!fcgi_ver.empty() && fcgi_ver != "unknown")
+    need_config = true;
+  if (!fcgi_hash.empty() && fcgi_hash != "unknown")
+    need_config = true;
+  if (!knxd_bver.empty())
+    need_config = true;
+  if (!knxd_bhash.empty())
+    need_config = true;
+
+  if (cached_knxd_runtime_.empty()) {
+    cached_knxd_runtime_ = query_knxd_version();
+  }
+  if (!cached_knxd_runtime_.empty())
+    need_config = true;
+
+  if (need_config) {
     json.add_key("c");
     json.start_object();
-    json.add_string("baseURL", base_url_);
+
+    if (!base_url_.empty()) {
+      json.add_string("baseURL", base_url_);
+    }
+
+    if (!fcgi_ver.empty() && fcgi_ver != "unknown") {
+      json.add_string("fcgiVersion", fcgi_ver);
+    }
+    if (!fcgi_hash.empty() && fcgi_hash != "unknown") {
+      json.add_string("fcgiGitHash", fcgi_hash);
+    }
+    if (!knxd_bver.empty()) {
+      json.add_string("knxdBuildVersion", knxd_bver);
+    }
+    if (!knxd_bhash.empty()) {
+      json.add_string("knxdBuildGitHash", knxd_bhash);
+    }
+    if (!cached_knxd_runtime_.empty()) {
+      json.add_string("knxdRuntimeVersion", cached_knxd_runtime_);
+    }
+
     json.end_object();
   }
 
