@@ -58,7 +58,7 @@ ReadResult ReadHandler::handle(std::string_view query_string) {
   ReadResult result;
 
   // ---- Get addresses first (before anything else, so 400 takes priority) ----
-  auto addresses = params.get_all("a");
+  const auto addresses = params.get_all("a");
   if (addresses.empty()) {
     result.http_status = 400;
     result.body = "{}";

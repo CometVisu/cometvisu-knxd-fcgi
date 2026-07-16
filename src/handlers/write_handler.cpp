@@ -27,12 +27,12 @@ WriteHandler::WriteHandler(KnxdClientInterface& knxd, SessionStore& sessions)
     : knxd_(knxd), sessions_(sessions) {}
 
 WriteResult WriteHandler::handle(std::string_view query_string) {
-  QueryString params{query_string};
+  const QueryString params{query_string};
   WriteResult result;
 
   // ---- Parameter extraction ----
-  auto addresses = params.get_all("a");
-  auto value_opt = params.get("v");
+  const auto addresses = params.get_all("a");
+  const auto value_opt = params.get("v");
 
   // Missing addresses or value: nothing to write, return 200 (no-op).
   if (addresses.empty() || !value_opt) {
@@ -48,7 +48,7 @@ WriteResult WriteHandler::handle(std::string_view query_string) {
   }
 
   // Decode hex value — if invalid, nothing to write, return 200.
-  auto hex_data = hex_decode(*value_opt);
+  const auto hex_data = hex_decode(*value_opt);
   if (hex_data.empty() && !value_opt->empty()) {
     return result;
   }
@@ -76,7 +76,7 @@ WriteResult WriteHandler::handle(std::string_view query_string) {
       continue;
 
     any_valid = true;
-    uint16_t eibaddr = parsed->group.to_eibaddr();
+    const uint16_t eibaddr = parsed->group.to_eibaddr();
     knxd_.send_group_packet(eibaddr, apdu);
   }
 

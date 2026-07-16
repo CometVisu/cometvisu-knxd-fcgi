@@ -78,8 +78,8 @@ QueryString::QueryString(std::string_view raw) {
     ++total_pairs;
 
     // Find key=value pair
-    size_t eq = raw.find('=', pos);
-    size_t amp = raw.find('&', pos);
+    const size_t eq = raw.find('=', pos);
+    const size_t amp = raw.find('&', pos);
 
     if (eq == std::string_view::npos || (amp != std::string_view::npos && eq > amp)) {
       // Malformed: no '=' before next '&', skip this pair
@@ -87,8 +87,8 @@ QueryString::QueryString(std::string_view raw) {
       continue;
     }
 
-    std::string key{url_decode(raw.substr(pos, eq - pos))};
-    size_t val_end = (amp == std::string_view::npos) ? raw.size() : amp;
+    const std::string key{url_decode(raw.substr(pos, eq - pos))};
+    const size_t val_end = (amp == std::string_view::npos) ? raw.size() : amp;
     std::string value{url_decode(raw.substr(eq + 1, val_end - eq - 1))};
 
     // Enforce max unique keys and max values per key

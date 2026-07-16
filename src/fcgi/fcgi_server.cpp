@@ -111,7 +111,7 @@ int FcgiServer::run() {
       // Read request parameters directly from the FCGI envp array.
       // This avoids setting the global environ pointer, making it safe
       // for use in both single-threaded and multithreaded contexts.
-      FcgiRequest req = read_request(request_.envp);
+      const FcgiRequest req = read_request(request_.envp);
 
       // ---- Load shedding for long-poll requests ----
       // When a shared semaphore is configured, try to acquire it before
@@ -139,7 +139,7 @@ int FcgiServer::run() {
 
       DebugLog::http_request(req.request_method, req.request_uri);
 
-      FcgiResponse resp = handler_(req);
+      const FcgiResponse resp = handler_(req);
 
       DebugLog::http_response(resp.status_code, resp.body);
 
@@ -158,11 +158,11 @@ int FcgiServer::run() {
     // Accept FastCGI connections from stdin/stdout as set up by spawn-fcgi
     // or the web server.
     while (FCGI_Accept() >= 0) {
-      FcgiRequest req = read_request();
+      const FcgiRequest req = read_request();
 
       DebugLog::http_request(req.request_method, req.request_uri);
 
-      FcgiResponse resp = handler_(req);
+      const FcgiResponse resp = handler_(req);
 
       DebugLog::http_response(resp.status_code, resp.body);
 

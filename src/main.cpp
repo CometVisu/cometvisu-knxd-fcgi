@@ -124,7 +124,7 @@ int main(int argc, char* argv[]) {
   // FastCGI binaries can be run from a terminal for introspection without
   // needing a running web server.
   if (argc > 1) {
-    std::string_view arg = argv[1];
+    const std::string_view arg = argv[1];
     if (arg == "--version" || arg == "-v") {
       std::cout << application_name() << " " << version() << "\n";
       return 0;

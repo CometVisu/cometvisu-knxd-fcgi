@@ -79,7 +79,7 @@ KnxGroupAddress KnxGroupAddress::from_eibaddr(uint16_t addr) {
 std::string KnxAddress::default_namespace_;
 
 std::optional<KnxAddress> KnxAddress::from_cometvisu(std::string_view str) {
-  auto colon = str.find(':');
+  const auto colon = str.find(':');
   if (colon == std::string_view::npos) {
     // No namespace: use the configured default namespace (empty by default).
     auto group = KnxGroupAddress::from_string(str);

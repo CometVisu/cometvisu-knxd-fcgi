@@ -28,8 +28,8 @@ bool connect_knxd_with_retry(KnxdClientInterface& knxd, const char* socket_path,
   // Extended (has_worked_before=true):  500ms, 1s, 2s, 4s, 8s → 6 attempts total
   const int default_delays_ms[] = {500, 1000, 2000, 4000, 8000};
   const int* delays_ms = custom_delays_ms != nullptr ? custom_delays_ms : default_delays_ms;
-  int num_retries = has_worked_before ? 5 : 3;
-  int total_attempts = num_retries + 1;
+  const int num_retries = has_worked_before ? 5 : 3;
+  const int total_attempts = num_retries + 1;
 
   for (int attempt = 1; attempt <= total_attempts; ++attempt) {
     if (knxd.connect(socket_path)) {
