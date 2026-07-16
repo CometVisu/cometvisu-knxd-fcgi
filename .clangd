@@ -4,12 +4,8 @@ CompileFlags:
 
 Diagnostics:
   ClangTidy:
-    Add:
-      - '*'
     Remove:
-      - llvm-header-guard
-      - google-build-namespaces
-      - readability-isolate-declaration
+      - llvmlibc-*
   Suppress:
     - 'pp_hash_error'
     - 'drv_unsupported_pragma'
