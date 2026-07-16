@@ -16,6 +16,7 @@
 #include <gtest/gtest.h>
 
 #include <cstdlib>
+#include <string>
 
 #include "handlers/login_handler.h"
 #include "state/session_store.h"
@@ -230,4 +231,15 @@ TEST(LoginHandlerTest, KnxdRuntimeVersionIsCached) {
   std::string r1 = handler.handle("");
   std::string r2 = handler.handle("");
   EXPECT_EQ(r1, r2);  // identical output (cached)
+}
+
+TEST(LoginHandlerTest, KnxdRuntimeVersionFromCustomBinary) {
+  // When a custom knxd binary path is provided, its --version output
+  // should appear as knxdRuntimeVersion in the login response.
+  SessionStore sessions;
+  const std::string mock_binary = std::string(TEST_SOURCE_DIR) + "/mock_knxd_version.sh";
+  LoginHandler handler(sessions, "", mock_binary);
+
+  std::string response = handler.handle("");
+  EXPECT_NE(response.find("\"knxdRuntimeVersion\":\"knxd 9.99.99-test\""), std::string::npos);
 }

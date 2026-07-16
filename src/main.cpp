@@ -150,6 +150,8 @@ int main(int argc, char* argv[]) {
           << "                        (default: empty = no prefix, e.g. set to \"KNX\")\n"
           << "  BASE_URL              URL prefix advertised in login response (unset = omitted)\n"
           << "                        (default: not set, e.g. /proxy/visu)\n"
+          << "  KNXD_BINARY           Path to the knxd binary for runtime version query\n"
+          << "                        (default: knxd, e.g. /usr/local/bin/knxd)\n"
           << "  DEBUG_BACKEND         Set to 1 to enable debug logging to stderr\n"
           << "\n"
           << "When run without options, starts the FastCGI server loop.\n";
@@ -204,6 +206,12 @@ int main(int argc, char* argv[]) {
   // When set, the /l endpoint includes a "c" object with "baseURL" set to this value.
   const char* base_url = getenv("BASE_URL");
 
+  // ---- Path to knxd binary for runtime version query ----
+  // Used by the login handler to run `knxd --version` at runtime.
+  // Default: "knxd" (lookup in PATH). Set to an absolute path if knxd is not
+  // in the FCGI process PATH (e.g., "/usr/local/bin/knxd").
+  const char* knxd_binary = get_env_default("KNXD_BINARY", "knxd");
+
   // ---- Optional direct socket (standalone mode) ----
   // Set FCGI_SOCKET to a TCP port (":9000") or Unix socket path to run without
   // spawn-fcgi. Read early so startup info can show it.
@@ -221,6 +229,7 @@ int main(int argc, char* argv[]) {
             << (address_prefix[0] != '\0' ? address_prefix : "(not set)") << "\n";
   std::cout << "[INFO]   BASE_URL              "
             << (base_url != nullptr && base_url[0] != '\0' ? base_url : "(not set)") << "\n";
+  std::cout << "[INFO]   KNXD_BINARY           " << knxd_binary << "\n";
   std::cout << "[INFO]   DEBUG_BACKEND         "
             << (getenv("DEBUG_BACKEND") != nullptr ? getenv("DEBUG_BACKEND") : "(not set)") << "\n";
 
@@ -266,7 +275,7 @@ int main(int argc, char* argv[]) {
   // getenv() at request time), because after FCGX_Accept_r() the environ
   // pointer is replaced with the FCGI parameter environment which may not
   // include BASE_URL.
-  Router router(knxd, sessions, longpoll_timeout, base_url != nullptr ? base_url : "");
+  Router router(knxd, sessions, longpoll_timeout, base_url != nullptr ? base_url : "", knxd_binary);
 
   // Register the request handler on the FCGI server
   server.set_handler([&](const FcgiRequest& req) -> FcgiResponse { return router.route(req); });
@@ -356,8 +365,8 @@ int main(int argc, char* argv[]) {
 
         if (!knxd.open_group_socket(false)) {
           std::cerr << "[ERROR] Worker pid=" << ::getpid() << " (worker " << i
-                    << "): Cannot open group socket "
-                    << "on knxd at " << knxd_socket << " (check knxd is running and accessible)\n";
+                    << "): Cannot open group socket " << "on knxd at " << knxd_socket
+                    << " (check knxd is running and accessible)\n";
           std::_Exit(2);
         }
 
