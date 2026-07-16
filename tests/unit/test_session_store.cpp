@@ -58,7 +58,7 @@ TEST(SessionStoreTest, RemoveSession) {
 
 TEST(SessionStoreTest, RemoveAnonymousNoop) {
   SessionStore store;
-  store.create_session(true);
+  (void)store.create_session(true);
   store.remove("0");
   EXPECT_TRUE(store.is_valid("0"));  // anonymous always valid
 }
@@ -87,11 +87,11 @@ TEST(SessionStoreTest, SessionIdsAreRandom) {
 TEST(SessionStoreTest, Count) {
   SessionStore store;
   EXPECT_EQ(store.count(), 0);
-  store.create_session(false);
+  (void)store.create_session(false);
   EXPECT_EQ(store.count(), 1);
-  store.create_session(true);  // anonymous not counted
+  (void)store.create_session(true);  // anonymous not counted
   EXPECT_EQ(store.count(), 1);
-  store.create_session(false);
+  (void)store.create_session(false);
   EXPECT_EQ(store.count(), 2);
 }
 
@@ -120,7 +120,7 @@ TEST(SessionStoreTest, MaxSessionsEnforced) {
   auto id3 = store.create_session(false);
   EXPECT_EQ(store.count(), 2);
   EXPECT_TRUE(store.is_valid(id3));
-  EXPECT_TRUE(store.is_valid(id2));  // newer session preserved
+  EXPECT_TRUE(store.is_valid(id2));   // newer session preserved
   EXPECT_FALSE(store.is_valid(id1));  // oldest evicted
 }
 

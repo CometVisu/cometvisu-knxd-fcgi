@@ -43,14 +43,20 @@ class ReadHandler {
 public:
   ReadHandler(KnxdClientInterface& knxd, SessionStore& sessions, int longpoll_timeout_sec = 300);
 
+  // Reference members prevent copy/move.
+  ReadHandler(const ReadHandler&) = delete;
+  ReadHandler& operator=(const ReadHandler&) = delete;
+  ReadHandler(ReadHandler&&) = delete;
+  ReadHandler& operator=(ReadHandler&&) = delete;
+
   /// Process a read request.
   /// @param query_string Raw QUERY_STRING from FCGI.
   /// @return ReadResult with status code and JSON body.
   [[nodiscard]] ReadResult handle(std::string_view query_string);
 
 private:
-  KnxdClientInterface& knxd_;
-  SessionStore& sessions_;
+  KnxdClientInterface& knxd_;  // NOLINT(cppcoreguidelines-avoid-const-or-ref-data-members)
+  SessionStore& sessions_;     // NOLINT(cppcoreguidelines-avoid-const-or-ref-data-members)
   int longpoll_timeout_sec_;
 
   [[nodiscard]] static std::optional<int> parse_timeout(std::string_view t_str);

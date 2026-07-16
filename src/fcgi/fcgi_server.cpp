@@ -30,6 +30,7 @@
 // POSIX environment pointer — used by the no-arg read_request() overload
 // via getenv().  The direct-socket and multithreaded paths pass the
 // FCGX_Request::envp array directly instead, avoiding races on environ.
+// NOLINTNEXTLINE(cppcoreguidelines-avoid-non-const-global-variables,readability-redundant-declaration)
 extern char** environ;
 
 namespace cvknxd {
@@ -64,7 +65,7 @@ bool FcgiServer::listen(const std::string& socket_path, int backlog) {
   if (backlog < 1) {
     backlog = 128;
   }
-  int fd = FCGX_OpenSocket(socket_path.c_str(), backlog);
+  const int fd = FCGX_OpenSocket(socket_path.c_str(), backlog);
   if (fd < 0) {
     return false;
   }
@@ -185,15 +186,17 @@ void FcgiServer::shutdown() {
     // Step 2: Connect to unblock any workers that didn't respond to
     // shutdown(). Each accepted connection gets an immediate client EOF,
     // causing FCGX_Accept_r to return -1 and the worker to exit.
-    struct sockaddr_un addr;
+    struct sockaddr_un addr{};
     socklen_t addr_len = sizeof(addr);
+    // NOLINTNEXTLINE(cppcoreguidelines-pro-type-reinterpret-cast)
     if (::getsockname(listen_fd_, reinterpret_cast<struct sockaddr*>(&addr), &addr_len) == 0) {
-      int wakeups = (num_workers_ > 0) ? num_workers_ : 64;
+      const int wakeups = (num_workers_ > 0) ? num_workers_ : 64;
       for (int i = 0; i < wakeups; ++i) {
-        int fd = ::socket(AF_UNIX, SOCK_STREAM | SOCK_NONBLOCK, 0);
+        const int fd = ::socket(AF_UNIX, SOCK_STREAM | SOCK_NONBLOCK, 0);
         if (fd < 0)
           break;
-        int ret = ::connect(fd, reinterpret_cast<struct sockaddr*>(&addr), addr_len);
+        // NOLINTNEXTLINE(cppcoreguidelines-pro-type-reinterpret-cast)
+        const int ret = ::connect(fd, reinterpret_cast<struct sockaddr*>(&addr), addr_len);
         if (ret == 0 || errno == EINPROGRESS) {
           // Connection queued — one worker will accept it
         } else {
@@ -221,9 +224,7 @@ int FcgiServer::run_multithreaded(int num_threads) {
     return 1;
   }
 
-  if (num_threads < 1) {
-    num_threads = 1;
-  }
+  num_threads = std::max(num_threads, 1);
 
   // FCGX_Init() must be called once before any FCGX_Accept_r().
   // It sets the libInitialized flag and performs platform-specific setup.
@@ -248,7 +249,7 @@ int FcgiServer::run_multithreaded(int num_threads) {
       }
 
       while (!shutdown_requested_.load(std::memory_order_relaxed)) {
-        int rc = FCGX_Accept_r(&request);
+        const int rc = FCGX_Accept_r(&request);
         if (rc < 0) {
           // Accept failed — either shutdown (listen_fd_ closed) or error.
           break;
@@ -257,10 +258,10 @@ int FcgiServer::run_multithreaded(int num_threads) {
         // Read request parameters directly from the FCGI envp array.
         // This avoids setting the global environ pointer, which would
         // race with other worker threads doing the same concurrently.
-        FcgiRequest req = read_request(request.envp);
+        const FcgiRequest req = read_request(request.envp);
         DebugLog::http_request(req.request_method, req.request_uri);
 
-        FcgiResponse resp = handler_(req);
+        const FcgiResponse resp = handler_(req);
         DebugLog::http_response(resp.status_code, resp.body);
 
         // Serialize FCGI output calls with a mutex.  libfcgi's internal
@@ -268,7 +269,7 @@ int FcgiServer::run_multithreaded(int num_threads) {
         // concurrent FCGX_PutStr / FCGX_Finish_r calls from different
         // worker threads can corrupt shared buffers.
         {
-          std::lock_guard<std::mutex> lock(fcgi_mutex_);
+          const std::scoped_lock lock(fcgi_mutex_);
           write_response_direct(request, resp);
           FCGX_Finish_r(&request);
         }
@@ -320,10 +321,12 @@ FcgiRequest FcgiServer::read_request() {
   // Read request body (for POST data, e.g., filter operations)
   if (req.request_method == "POST" || req.request_method == "PUT") {
     const char* content_length_str = getenv("CONTENT_LENGTH");
+    // NOLINTNEXTLINE(cppcoreguidelines-pro-bounds-pointer-arithmetic)
     if (content_length_str[0] != '\0') {
       int content_length = 0;
-      auto [ptr, ec] = std::from_chars(
-          content_length_str, content_length_str + std::strlen(content_length_str), content_length);
+      // NOLINTNEXTLINE(cppcoreguidelines-pro-bounds-pointer-arithmetic)
+      const char* cl_end = content_length_str + std::strlen(content_length_str);
+      auto [ptr, ec] = std::from_chars(content_length_str, cl_end, content_length);
       if (ec != std::errc{} || content_length <= 0) {
         // Invalid or non-positive content length — skip body
         return req;
@@ -336,13 +339,17 @@ FcgiRequest FcgiServer::read_request() {
       }
       req.content.resize(static_cast<size_t>(content_length));
       // Read from FCGI stdin
+      const size_t max_len = static_cast<size_t>(content_length);
       size_t total = 0;
-      while (total < static_cast<size_t>(content_length)) {
-        int n = FCGI_fread(req.content.data() + total, 1,
-                           static_cast<int>(req.content.size() - total), stdin);
-        if (n <= 0)
+      while (total < max_len) {
+        const size_t remaining = max_len - total;
+        if (remaining == 0)
           break;
-        total += static_cast<size_t>(n);
+        // NOLINTNEXTLINE(cppcoreguidelines-pro-bounds-pointer-arithmetic)
+        const size_t nread = FCGI_fread(req.content.data() + total, 1, remaining, stdin);
+        if (nread == 0)
+          break;
+        total += nread;
       }
       // Shrink to actual bytes read (in case of early EOF)
       req.content.resize(total);
@@ -361,12 +368,16 @@ FcgiRequest FcgiServer::read_request(char** envp) {
 
   // Helper: find a value by name in a null-terminated envp array.
   // Each entry is "KEY=VALUE". Returns pointer to VALUE part, or nullptr.
-  auto get_env = [](char** envp, const char* name) -> const char* {
-    if (envp == nullptr || name == nullptr)
+  // NOLINTNEXTLINE(cppcoreguidelines-pro-bounds-pointer-arithmetic)
+  auto get_env = [](char** env_array, const char* name) -> const char* {
+    if (env_array == nullptr || name == nullptr)
       return nullptr;
-    size_t name_len = std::strlen(name);
-    for (char** e = envp; *e != nullptr; ++e) {
+    const size_t name_len = std::strlen(name);
+    // NOLINTNEXTLINE(cppcoreguidelines-pro-bounds-pointer-arithmetic)
+    for (const char* const* e = const_cast<const char* const*>(env_array); *e != nullptr; ++e) {
+      // NOLINTNEXTLINE(cppcoreguidelines-pro-bounds-pointer-arithmetic)
       if (std::strncmp(*e, name, name_len) == 0 && (*e)[name_len] == '=') {
+        // NOLINTNEXTLINE(cppcoreguidelines-pro-bounds-pointer-arithmetic)
         return *e + name_len + 1;
       }
     }
@@ -389,10 +400,12 @@ FcgiRequest FcgiServer::read_request(char** envp) {
   // Read request body (for POST data, e.g., filter operations)
   if (req.request_method == "POST" || req.request_method == "PUT") {
     const char* content_length_str = get_env(envp, "CONTENT_LENGTH");
+    // NOLINTNEXTLINE(cppcoreguidelines-pro-bounds-pointer-arithmetic)
     if (content_length_str != nullptr && content_length_str[0] != '\0') {
       int content_length = 0;
-      auto [ptr, ec] = std::from_chars(
-          content_length_str, content_length_str + std::strlen(content_length_str), content_length);
+      // NOLINTNEXTLINE(cppcoreguidelines-pro-bounds-pointer-arithmetic)
+      const char* cl_end = content_length_str + std::strlen(content_length_str);
+      auto [ptr, ec] = std::from_chars(content_length_str, cl_end, content_length);
       if (ec != std::errc{} || content_length <= 0) {
         return req;
       }
@@ -401,14 +414,18 @@ FcgiRequest FcgiServer::read_request(char** envp) {
                   << kMaxContentLength << ", truncating\n";
         content_length = kMaxContentLength;
       }
-      req.content.resize(static_cast<size_t>(content_length));
+      const size_t max_len = static_cast<size_t>(content_length);
+      req.content.resize(max_len);
       size_t total = 0;
-      while (total < static_cast<size_t>(content_length)) {
-        int n = FCGI_fread(req.content.data() + total, 1,
-                           static_cast<int>(req.content.size() - total), stdin);
-        if (n <= 0)
+      while (total < max_len) {
+        const size_t remaining = max_len - total;
+        if (remaining == 0)
           break;
-        total += static_cast<size_t>(n);
+        // NOLINTNEXTLINE(cppcoreguidelines-pro-bounds-pointer-arithmetic)
+        const size_t nread = FCGI_fread(req.content.data() + total, 1, remaining, stdin);
+        if (nread == 0)
+          break;
+        total += nread;
       }
       req.content.resize(total);
     }

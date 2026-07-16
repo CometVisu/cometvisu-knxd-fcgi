@@ -15,6 +15,7 @@
 
 #include <gtest/gtest.h>
 
+#include <array>
 #include <chrono>
 #include <cstdio>
 #include <cstdlib>
@@ -47,7 +48,8 @@ class RealKnxdE2ETest : public ::testing::Test {
 protected:
   void SetUp() override {
     const char* socket = std::getenv("KNXD_SOCKET");
-    knxd_socket_path_ = (socket && socket[0] != '\0') ? socket : "/tmp/knxd-ipt";
+    // NOLINTNEXTLINE(cppcoreguidelines-pro-bounds-pointer-arithmetic)
+    knxd_socket_path_ = (socket != nullptr && socket[0] != '\0') ? socket : "/tmp/knxd-ipt";
 
     if (!knxd_.connect(knxd_socket_path_)) {
       GTEST_SKIP() << "Cannot connect to knxd at " << knxd_socket_path_;
@@ -59,7 +61,8 @@ protected:
     knxd_.set_nonblocking(true);
 
     const auto* ti = ::testing::UnitTest::GetInstance()->current_test_info();
-    int id = ti->test_case_name()[0] + ti->name()[0];
+    // NOLINTNEXTLINE(cppcoreguidelines-pro-bounds-pointer-arithmetic)
+    const int id = ti->test_suite_name()[0] + ti->name()[0];
     base_ = static_cast<uint16_t>(0x1000 | ((id & 0x1F) << 6));
   }
 
@@ -68,7 +71,14 @@ protected:
   /// FcgiRequest fields: method, uri, query, ctype, content, script, path_info, proto
   static FcgiRequest req(const std::string& method, const std::string& path,
                          const std::string& query = "") {
-    return FcgiRequest{method, "", query, "", "", "", path, ""};
+    return FcgiRequest{.request_method = method,
+                       .request_uri = "",
+                       .query_string = query,
+                       .content_type = "",
+                       .content = "",
+                       .script_name = "",
+                       .path_info = path,
+                       .server_protocol = ""};
   }
 
   std::string a(int sub) const {
@@ -78,7 +88,7 @@ protected:
   std::string k(int sub) const { return KnxGroupAddress::from_eibaddr(e(sub)).to_string(); }
 
   static std::string sid(const std::string& json) {
-    auto s = json.find("\"s\":\"");
+    auto s = json.find(R"("s":")");
     if (s == std::string::npos)
       return "";
     s += 5;
@@ -87,16 +97,17 @@ protected:
   }
 
   void inject(int sub, int value) {
-    std::string cmd = "knxtool groupswrite local:" + knxd_socket_path_ + " " + k(sub) + " " +
-                      std::to_string(value) + " 2>/dev/null";
-    (void)std::system(cmd.c_str());
+    const std::string cmd = "knxtool groupswrite local:" + knxd_socket_path_ + " " + k(sub) + " " +
+                            std::to_string(value) + " 2>/dev/null";
+    // NOLINTNEXTLINE(cert-env33-c)
+    [[maybe_unused]] const int _ = std::system(cmd.c_str());
     std::this_thread::sleep_for(std::chrono::milliseconds(80));
   }
 
   static std::string hex(int v) {
-    char buf[8];
-    snprintf(buf, sizeof(buf), "00%02x", 0x80 | (v & 0x3F));
-    return buf;
+    std::array<char, 8> buf{};
+    [[maybe_unused]] const int _ = snprintf(buf.data(), buf.size(), "00%02x", 0x80 | (v & 0x3F));
+    return buf.data();
   }
 
   std::string knxd_socket_path_;

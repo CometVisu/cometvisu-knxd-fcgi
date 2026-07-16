@@ -55,7 +55,7 @@ bool MockKnxdClient::open_group_socket(bool /*write_only*/) {
 bool MockKnxdClient::send_group_packet(uint16_t group_addr, const std::vector<uint8_t>& apdu) {
   if (!connected_ || !group_socket_open_)
     return false;
-  sent_packets_.push_back({group_addr, apdu});
+  sent_packets_.push_back({.group_addr = group_addr, .apdu = apdu});
   return true;
 }
 
@@ -142,7 +142,7 @@ void MockKnxdClient::set_cached_value(uint16_t addr, const std::vector<uint8_t>&
 }
 
 void MockKnxdClient::enqueue_telegram(uint16_t addr, const std::vector<uint8_t>& apdu) {
-  telegram_queue_.push({addr, apdu});
+  telegram_queue_.emplace(addr, apdu);
 }
 
 void MockKnxdClient::reset() {
@@ -165,7 +165,9 @@ void MockKnxdClient::reset() {
 void MockKnxdClient::set_last_updates_result(uint32_t after_position,
                                              const std::vector<uint16_t>& changed_addrs,
                                              uint32_t new_position) {
-  last_updates_queue_.push({after_position, changed_addrs, new_position});
+  last_updates_queue_.push({.after_position = after_position,
+                            .changed_addrs = changed_addrs,
+                            .new_position = new_position});
 }
 
 }  // namespace cvknxd

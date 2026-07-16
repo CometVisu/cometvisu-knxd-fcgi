@@ -1,0 +1,15 @@
+CompileFlags:
+  Add:
+    - -Wno-pragma-once
+
+Diagnostics:
+  ClangTidy:
+    Add:
+      - '*'
+    Remove:
+      - llvm-header-guard
+      - google-build-namespaces
+      - readability-isolate-declaration
+  Suppress:
+    - 'pp_hash_error'
+    - 'drv_unsupported_pragma'

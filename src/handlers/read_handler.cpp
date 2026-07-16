@@ -42,11 +42,13 @@ std::optional<int> ReadHandler::parse_timeout(std::string_view t_str) {
     return std::nullopt;
   }
   int val = 0;
+  // NOLINTNEXTLINE(cppcoreguidelines-pro-bounds-pointer-arithmetic)
   const auto [ptr, ec] = std::from_chars(t_str.data(), t_str.data() + t_str.size(), val);
   if (ec != std::errc{}) {
     return std::nullopt;
   }
   // Check for trailing garbage
+  // NOLINTNEXTLINE(cppcoreguidelines-pro-bounds-pointer-arithmetic)
   if (ptr != t_str.data() + t_str.size()) {
     return std::nullopt;
   }
@@ -80,7 +82,7 @@ ReadResult ReadHandler::handle(std::string_view query_string) {
   // If t == 0: force initial read (lastpos=0) and set timeout to 1 second.
   int timeout_sec = longpoll_timeout_sec_;
   if (auto t_opt = params.get("t")) {
-    auto parsed = parse_timeout(*t_opt);
+    const auto parsed = parse_timeout(*t_opt);
     if (!parsed.has_value()) {
       result.http_status = 400;
       result.body = "{}";
@@ -94,7 +96,7 @@ ReadResult ReadHandler::handle(std::string_view query_string) {
   // 0 means the client has no prior state.
   uint32_t lastpos = 0;
   if (auto i_opt = params.get("i")) {
-    auto parsed = parse_timeout(*i_opt);  // reuse int parser
+    const auto parsed = parse_timeout(*i_opt);  // reuse int parser
     if (parsed.has_value() && *parsed >= 0) {
       lastpos = static_cast<uint32_t>(*parsed);
     }
@@ -109,8 +111,8 @@ ReadResult ReadHandler::handle(std::string_view query_string) {
 
   // ---- Collect EIB addresses and build lookup set ----
   std::set<uint16_t> eib_addrs;
-  for (auto addr_str : addresses) {
-    auto parsed = KnxAddress::from_cometvisu(addr_str);
+  for (const auto& addr_str : addresses) {
+    const auto parsed = KnxAddress::from_cometvisu(addr_str);
     if (parsed) {
       eib_addrs.insert(parsed->group.to_eibaddr());
     }
@@ -124,8 +126,8 @@ ReadResult ReadHandler::handle(std::string_view query_string) {
 
   // Helper: build the key for an address in the JSON response.
   auto addr_key = [](uint16_t eib_addr) -> std::string {
-    return KnxAddress{std::string{KnxAddress::get_default_namespace()},
-                      KnxGroupAddress::from_eibaddr(eib_addr)}
+    return KnxAddress{.ns = std::string{KnxAddress::get_default_namespace()},
+                      .group = KnxGroupAddress::from_eibaddr(eib_addr)}
         .to_cometvisu();
   };
 
@@ -146,7 +148,7 @@ ReadResult ReadHandler::handle(std::string_view query_string) {
   // responses.
   if (lastpos == 0) {
     for (auto addr : eib_addrs) {
-      auto data = knxd_.cache_read(addr, true);  // nowait (cache_read filters out Read APDUs)
+      const auto data = knxd_.cache_read(addr, true);  // nowait (cache_read filters out Read APDUs)
       if (data) {
         json.add_string(addr_key(addr), hex_encode(data->data(), data->size()));
         already_written.insert(addr);
@@ -175,10 +177,10 @@ ReadResult ReadHandler::handle(std::string_view query_string) {
 
   while ((!written || lastpos < 1) && timeout_sec > 0) {
     // Calculate remaining time
-    auto elapsed =
+    const auto elapsed =
         std::chrono::duration_cast<std::chrono::seconds>(std::chrono::steady_clock::now() - tstart)
             .count();
-    int remaining = timeout_sec - static_cast<int>(elapsed);
+    const int remaining = timeout_sec - static_cast<int>(elapsed);
     if (remaining <= 0)
       break;
 
@@ -188,23 +190,19 @@ ReadResult ReadHandler::handle(std::string_view query_string) {
     // The KnxdClient implementation handles internal reconnection transparently,
     // but if knxd is still down after the internal retry, we attempt a full
     // reconnect here and continue the loop with the remaining time budget.
-    auto call_start = std::chrono::steady_clock::now();
-    auto updates = knxd_.cache_last_updates_2(lastpos, remaining);
+    const auto updates = knxd_.cache_last_updates_2(lastpos, remaining);
     if (!updates.has_value()) {
       // cache_last_updates_2 can return nullopt for three reasons:
       // 1. Transient cache connection failure — retry with delay.
       // 2. Connection error — reconnect and retry if time remains.
       // 3. Timeout (blocks for remaining time) — break normally.
       //
-      // Distinguish by checking connection health and call duration.
-      auto call_elapsed_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
-                                 std::chrono::steady_clock::now() - call_start)
-                                 .count();
-
+      // Distinguish by checking connection health.
       if (!knxd_.is_connected()) {
         // Connection is dead — reconnect and retry if time remains
-        auto now = std::chrono::steady_clock::now();
-        auto elapsed_sec = std::chrono::duration_cast<std::chrono::seconds>(now - tstart).count();
+        const auto now = std::chrono::steady_clock::now();
+        const auto elapsed_sec =
+            std::chrono::duration_cast<std::chrono::seconds>(now - tstart).count();
         if (elapsed_sec < timeout_sec && (timeout_sec - elapsed_sec) > 1) {
           knxd_.reconnect();
           std::this_thread::sleep_for(std::chrono::milliseconds(200));
@@ -228,19 +226,19 @@ ReadResult ReadHandler::handle(std::string_view query_string) {
     // Successful call — reset retry counter
     nullopt_retries = 0;
 
-    uint32_t prev_lastpos = lastpos;
+    const uint32_t prev_lastpos = lastpos;
     lastpos = updates->new_position;
 
     // Process all changed addresses
-    for (auto changed_addr : updates->changed_addresses) {
+    for (const auto changed_addr : updates->changed_addresses) {
       // Only include subscribed addresses, and deduplicate
-      if (eib_addrs.find(changed_addr) == eib_addrs.end())
+      if (!eib_addrs.contains(changed_addr))
         continue;
-      if (already_written.find(changed_addr) != already_written.end())
+      if (already_written.contains(changed_addr))
         continue;
 
       // Read the current value from cache (cache_read filters out Read APDUs)
-      auto data = knxd_.cache_read(changed_addr, true);  // nowait
+      const auto data = knxd_.cache_read(changed_addr, true);  // nowait
       if (data) {
         json.add_string(addr_key(changed_addr), hex_encode(data->data(), data->size()));
         already_written.insert(changed_addr);

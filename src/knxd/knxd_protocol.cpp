@@ -65,7 +65,8 @@ std::string KnxGroupAddress::to_string() const {
 }
 
 uint16_t KnxGroupAddress::to_eibaddr() const {
-  return static_cast<uint16_t>((main << 11) | (middle << 8) | sub);
+  return static_cast<uint16_t>((static_cast<uint16_t>(main) << 11) |
+                               (static_cast<uint16_t>(middle) << 8) | sub);
 }
 
 KnxGroupAddress KnxGroupAddress::from_eibaddr(uint16_t addr) {

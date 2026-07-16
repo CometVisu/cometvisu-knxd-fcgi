@@ -55,6 +55,12 @@ public:
   FcgiServer();
   ~FcgiServer();
 
+  // Non-copyable, non-movable (holds threads and socket fd).
+  FcgiServer(const FcgiServer&) = delete;
+  FcgiServer& operator=(const FcgiServer&) = delete;
+  FcgiServer(FcgiServer&&) = delete;
+  FcgiServer& operator=(FcgiServer&&) = delete;
+
   /// Set the callback for handling requests.
   void set_handler(RequestHandler handler);
 

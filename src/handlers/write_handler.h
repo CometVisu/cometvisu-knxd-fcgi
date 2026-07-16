@@ -36,14 +36,20 @@ class WriteHandler {
 public:
   WriteHandler(KnxdClientInterface& knxd, SessionStore& sessions);
 
+  // Reference members prevent copy/move.
+  WriteHandler(const WriteHandler&) = delete;
+  WriteHandler& operator=(const WriteHandler&) = delete;
+  WriteHandler(WriteHandler&&) = delete;
+  WriteHandler& operator=(WriteHandler&&) = delete;
+
   /// Process a write request.
   /// @param query_string Raw QUERY_STRING from FCGI.
   /// @return WriteResult with status code.
   [[nodiscard]] WriteResult handle(std::string_view query_string);
 
 private:
-  KnxdClientInterface& knxd_;
-  SessionStore& sessions_;
+  KnxdClientInterface& knxd_;  // NOLINT(cppcoreguidelines-avoid-const-or-ref-data-members)
+  SessionStore& sessions_;     // NOLINT(cppcoreguidelines-avoid-const-or-ref-data-members)
 };
 
 }  // namespace cvknxd

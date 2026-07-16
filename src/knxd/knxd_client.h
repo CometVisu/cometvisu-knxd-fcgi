@@ -27,6 +27,7 @@
 namespace cvknxd {
 
 /// Interface for knxd communication — allows mocking in tests.
+// NOLINTNEXTLINE(cppcoreguidelines-special-member-functions)
 class KnxdClientInterface {
 public:
   virtual ~KnxdClientInterface() = default;
