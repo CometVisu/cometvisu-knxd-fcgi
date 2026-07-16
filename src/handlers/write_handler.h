@@ -13,7 +13,8 @@
 // You should have received a copy of the GNU General Public License
 // along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
-#pragma once
+#ifndef COMETVISU_KNXD_FCGI_WRITE_HANDLER_H_
+#define COMETVISU_KNXD_FCGI_WRITE_HANDLER_H_
 
 #include <string>
 #include <string_view>
@@ -36,14 +37,24 @@ class WriteHandler {
 public:
   WriteHandler(KnxdClientInterface& knxd, SessionStore& sessions);
 
+  ~WriteHandler() = default;
+
+  // Reference members prevent copy/move.
+  WriteHandler(const WriteHandler&) = delete;
+  WriteHandler& operator=(const WriteHandler&) = delete;
+  WriteHandler(WriteHandler&&) = delete;
+  WriteHandler& operator=(WriteHandler&&) = delete;
+
   /// Process a write request.
   /// @param query_string Raw QUERY_STRING from FCGI.
   /// @return WriteResult with status code.
   [[nodiscard]] WriteResult handle(std::string_view query_string);
 
 private:
-  KnxdClientInterface& knxd_;
-  SessionStore& sessions_;
+  KnxdClientInterface& knxd_;  // NOLINT(cppcoreguidelines-avoid-const-or-ref-data-members)
+  SessionStore& sessions_;     // NOLINT(cppcoreguidelines-avoid-const-or-ref-data-members)
 };
 
 }  // namespace cvknxd
+
+#endif  // COMETVISU_KNXD_FCGI_WRITE_HANDLER_H_

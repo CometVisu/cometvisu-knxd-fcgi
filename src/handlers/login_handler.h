@@ -13,7 +13,8 @@
 // You should have received a copy of the GNU General Public License
 // along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
-#pragma once
+#ifndef COMETVISU_KNXD_FCGI_LOGIN_HANDLER_H_
+#define COMETVISU_KNXD_FCGI_LOGIN_HANDLER_H_
 
 #include <string>
 #include <string_view>
@@ -30,14 +31,31 @@ public:
   ///                   (e.g. "/proxy/visu"). Empty = omit "c" block entirely.
   explicit LoginHandler(SessionStore& sessions, std::string base_url = "");
 
+  ~LoginHandler() = default;
+
+  // Reference/const members prevent copy/move.
+  LoginHandler(const LoginHandler&) = delete;
+  LoginHandler& operator=(const LoginHandler&) = delete;
+  LoginHandler(LoginHandler&&) = delete;
+  LoginHandler& operator=(LoginHandler&&) = delete;
+
   /// Process a login request.
   /// @param query_string Raw QUERY_STRING from FCGI.
   /// @return JSON response body: {"v":"0.0.2","s":"SESSION_ID"}
   [[nodiscard]] std::string handle(std::string_view query_string);
 
 private:
-  SessionStore& sessions_;
-  std::string base_url_;
+  SessionStore& sessions_;      // NOLINT(cppcoreguidelines-avoid-const-or-ref-data-members)
+  const std::string base_url_;  // NOLINT(cppcoreguidelines-avoid-const-or-ref-data-members)
+
+  /// Cached knxd runtime version. Populated on first /l request by running
+  /// `knxd --version`. Empty if knxd is not installed or the call fails.
+  std::string cached_knxd_runtime_;
+
+  /// Run `knxd --version` and extract the version string.
+  [[nodiscard]] static std::string query_knxd_version();
 };
 
 }  // namespace cvknxd
+
+#endif  // COMETVISU_KNXD_FCGI_LOGIN_HANDLER_H_

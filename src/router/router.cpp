@@ -29,17 +29,17 @@ FcgiResponse Router::route(const FcgiRequest& request) {
   FcgiResponse response;
 
   // Use FcgiRequest::path() to get the clean path without query string
-  std::string_view path = request.path();
+  const std::string_view path = request.path();
 
   if (path == "/l") {
-    std::string body = login_handler_.handle(request.query_string);
+    const std::string body = login_handler_.handle(request.query_string);
     response.body = std::move(body);
   } else if (path == "/r") {
-    auto result = read_handler_.handle(request.query_string);
+    const auto result = read_handler_.handle(request.query_string);
     response.status_code = result.http_status;
     response.body = std::move(result.body);
   } else if (path == "/w") {
-    auto result = write_handler_.handle(request.query_string);
+    const auto result = write_handler_.handle(request.query_string);
     response.status_code = result.http_status;
   } else {
     // Unknown endpoint

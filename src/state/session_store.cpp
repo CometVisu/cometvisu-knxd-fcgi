@@ -57,14 +57,14 @@ bool SessionStore::is_valid(std::string_view session_id) {
   std::lock_guard<std::mutex> lock(mutex_);
 
   std::string key{session_id};
-  auto it = sessions_.find(key);
+  const auto it = sessions_.find(key);
   if (it == sessions_.end())
     return false;
 
   // Check expiration
-  auto age = std::chrono::duration_cast<std::chrono::seconds>(std::chrono::steady_clock::now() -
-                                                              it->second.created)
-                 .count();
+  const auto age = std::chrono::duration_cast<std::chrono::seconds>(
+                       std::chrono::steady_clock::now() - it->second.created)
+                       .count();
   if (age >= session_ttl_sec_) {
     // Expired — remove from store and return false
     sessions_.erase(it);
@@ -82,10 +82,11 @@ void SessionStore::remove(std::string_view session_id) {
 }
 
 void SessionStore::cleanup_expired() {
-  auto now = std::chrono::steady_clock::now();
+  const auto now = std::chrono::steady_clock::now();
   auto it = sessions_.begin();
   while (it != sessions_.end()) {
-    auto age = std::chrono::duration_cast<std::chrono::seconds>(now - it->second.created).count();
+    const auto age =
+        std::chrono::duration_cast<std::chrono::seconds>(now - it->second.created).count();
     if (age >= session_ttl_sec_) {
       it = sessions_.erase(it);
     } else {
@@ -107,7 +108,7 @@ std::string SessionStore::generate_id() {
   static thread_local std::mt19937_64 gen(seed);
   static thread_local std::uniform_int_distribution<uint64_t> dist;
 
-  uint64_t num = dist(gen);
+  const uint64_t num = dist(gen);
   std::string id;
   id.reserve(16);
   static constexpr char kHex[] = "0123456789abcdef";

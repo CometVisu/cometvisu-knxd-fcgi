@@ -13,7 +13,8 @@
 // You should have received a copy of the GNU General Public License
 // along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
-#pragma once
+#ifndef COMETVISU_KNXD_FCGI_FCGI_SERVER_H_
+#define COMETVISU_KNXD_FCGI_FCGI_SERVER_H_
 
 #include <fcgiapp.h>
 #include <semaphore.h>
@@ -54,6 +55,12 @@ class FcgiServer {
 public:
   FcgiServer();
   ~FcgiServer();
+
+  // Non-copyable, non-movable (holds threads and socket fd).
+  FcgiServer(const FcgiServer&) = delete;
+  FcgiServer& operator=(const FcgiServer&) = delete;
+  FcgiServer(FcgiServer&&) = delete;
+  FcgiServer& operator=(FcgiServer&&) = delete;
 
   /// Set the callback for handling requests.
   void set_handler(RequestHandler handler);
@@ -140,3 +147,5 @@ private:
 };
 
 }  // namespace cvknxd
+
+#endif  // COMETVISU_KNXD_FCGI_FCGI_SERVER_H_

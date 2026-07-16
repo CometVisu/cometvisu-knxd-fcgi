@@ -25,6 +25,32 @@ std::string_view version() {
 #endif
 }
 
-std::string_view application_name() { return "cometvisu-knxd-fcgi"; }
+std::string_view application_name() {
+  return "cometvisu-knxd-fcgi";
+}
+
+std::string_view git_hash() {
+#ifdef GIT_HASH
+  return GIT_HASH;
+#else
+  return "unknown";
+#endif
+}
+
+std::string_view knxd_build_version() {
+#ifdef KNXD_BUILD_VERSION
+  return KNXD_BUILD_VERSION;
+#else
+  return "";
+#endif
+}
+
+std::string_view knxd_build_git_hash() {
+#ifdef KNXD_BUILD_GIT_HASH
+  return KNXD_BUILD_GIT_HASH;
+#else
+  return "";
+#endif
+}
 
 }  // namespace cvknxd

@@ -1,0 +1,11 @@
+CompileFlags:
+  Add:
+    - -Wno-pragma-once
+
+Diagnostics:
+  ClangTidy:
+    Remove:
+      - llvmlibc-*
+  Suppress:
+    - 'pp_hash_error'
+    - 'drv_unsupported_pragma'

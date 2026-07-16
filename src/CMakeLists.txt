@@ -30,7 +30,16 @@ add_library(cvknxd_version STATIC
 )
 
 target_include_directories(cvknxd_version PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
-target_compile_definitions(cvknxd_version PUBLIC APP_VERSION="${PROJECT_VERSION}")
+target_compile_definitions(cvknxd_version PUBLIC
+    APP_VERSION="${PROJECT_VERSION}"
+    GIT_HASH="${GIT_HASH}"
+)
+if(KNXD_BUILD_VERSION)
+    target_compile_definitions(cvknxd_version PUBLIC KNXD_BUILD_VERSION="${KNXD_BUILD_VERSION}")
+endif()
+if(KNXD_BUILD_GIT_HASH)
+    target_compile_definitions(cvknxd_version PUBLIC KNXD_BUILD_GIT_HASH="${KNXD_BUILD_GIT_HASH}")
+endif()
 target_link_libraries(cvknxd_version PUBLIC)
 
 # ---- knxd client library ----
@@ -76,7 +85,7 @@ add_library(cvknxd_handlers STATIC
 )
 
 target_include_directories(cvknxd_handlers PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
-target_link_libraries(cvknxd_handlers PUBLIC cvknxd_knxd cvknxd_state cvknxd_util)
+target_link_libraries(cvknxd_handlers PUBLIC cvknxd_knxd cvknxd_state cvknxd_util cvknxd_version)
 
 # ---- Main executable ----
 add_executable(cometvisu-knxd-fcgi

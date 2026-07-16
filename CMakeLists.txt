@@ -19,6 +19,19 @@ cmake_minimum_required(VERSION 3.20)
 file(STRINGS "${CMAKE_SOURCE_DIR}/VERSION" _version_text)
 string(STRIP "${_version_text}" PROJECT_VERSION_STRING)
 
+# ---- Git hash (compile-time) ----
+execute_process(
+    COMMAND git rev-parse --short HEAD
+    WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}"
+    OUTPUT_VARIABLE GIT_HASH
+    OUTPUT_STRIP_TRAILING_WHITESPACE
+    ERROR_QUIET
+    RESULT_VARIABLE _git_result
+)
+if(NOT _git_result EQUAL 0 OR GIT_HASH STREQUAL "")
+    set(GIT_HASH "unknown")
+endif()
+
 project(cometvisu-knxd-fcgi
     VERSION ${PROJECT_VERSION_STRING}
     DESCRIPTION "FastCGI backend bridging CometVisu Protocol to knxd"
@@ -85,6 +98,34 @@ if(KNXD_SOURCE_DIR)
         message(FATAL_ERROR "KNXD_SOURCE_DIR=${KNXD_SOURCE_DIR} but "
                 "eibtypes.h not found in ${KNXD_SOURCE_DIR}/include/")
     endif()
+
+    # Best-effort: detect knxd version from source checkout.
+    # Try VERSION file, then configure.ac, then check for git describe.
+    if(EXISTS "${KNXD_SOURCE_DIR}/VERSION")
+        file(STRINGS "${KNXD_SOURCE_DIR}/VERSION" _knxd_version_text)
+        string(STRIP "${_knxd_version_text}" KNXD_BUILD_VERSION)
+    elseif(EXISTS "${KNXD_SOURCE_DIR}/configure.ac")
+        file(STRINGS "${KNXD_SOURCE_DIR}/configure.ac" _ac_text REGEX "AC_INIT")
+        if(_ac_text MATCHES "AC_INIT\\([^,]*,\\[?([0-9.]+)")
+            set(KNXD_BUILD_VERSION "${CMAKE_MATCH_1}")
+        endif()
+    else()
+        set(KNXD_BUILD_VERSION "")
+    endif()
+
+    # Best-effort: detect knxd git hash from source checkout.
+    execute_process(
+        COMMAND git rev-parse --short HEAD
+        WORKING_DIRECTORY "${KNXD_SOURCE_DIR}"
+        OUTPUT_VARIABLE KNXD_BUILD_GIT_HASH
+        OUTPUT_STRIP_TRAILING_WHITESPACE
+        ERROR_QUIET
+        RESULT_VARIABLE _knxd_git_result
+    )
+    if(NOT _knxd_git_result EQUAL 0 OR KNXD_BUILD_GIT_HASH STREQUAL "")
+        set(KNXD_BUILD_GIT_HASH "")
+    endif()
+
     message(STATUS "Using knxd headers from source checkout: ${KNXD_INCLUDE_DIR}")
 else()
     # No source dir given — search system include paths (knxd-dev package).
@@ -96,6 +137,44 @@ else()
                 "  Option B: Point CMake to a knxd source checkout:\n"
                 "    cmake -B build -DKNXD_SOURCE_DIR=/path/to/knxd")
     endif()
+
+    # Best-effort: detect knxd version from system package.
+    # Try pkg-config first, then dpkg.
+    find_program(PKG_CONFIG_EXECUTABLE pkg-config)
+    if(PKG_CONFIG_EXECUTABLE)
+        execute_process(
+            COMMAND ${PKG_CONFIG_EXECUTABLE} --modversion knxd
+            OUTPUT_VARIABLE KNXD_BUILD_VERSION
+            OUTPUT_STRIP_TRAILING_WHITESPACE
+            ERROR_QUIET
+            RESULT_VARIABLE _pkg_result
+        )
+        if(NOT _pkg_result EQUAL 0 OR KNXD_BUILD_VERSION STREQUAL "")
+            set(KNXD_BUILD_VERSION "")
+        endif()
+    else()
+        # Fallback: try dpkg
+        find_program(DPKG_EXECUTABLE dpkg-query)
+        if(DPKG_EXECUTABLE)
+            execute_process(
+                COMMAND ${DPKG_EXECUTABLE} -W -f='${Version}' knxd-dev
+                OUTPUT_VARIABLE _knxd_pkg_version
+                OUTPUT_STRIP_TRAILING_WHITESPACE
+                ERROR_QUIET
+                RESULT_VARIABLE _dpkg_result
+            )
+            if(_dpkg_result EQUAL 0 AND NOT _knxd_pkg_version STREQUAL "")
+                string(REGEX REPLACE "-.*" "" KNXD_BUILD_VERSION "${_knxd_pkg_version}")
+            else()
+                set(KNXD_BUILD_VERSION "")
+            endif()
+        else()
+            set(KNXD_BUILD_VERSION "")
+        endif()
+    endif()
+
+    set(KNXD_BUILD_GIT_HASH "")
+
     message(STATUS "Using knxd headers from system: ${KNXD_INCLUDE_DIR}")
 endif()
 

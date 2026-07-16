@@ -354,7 +354,7 @@ bool KnxdClient::send_group_packet(uint16_t group_addr, const std::vector<uint8_
       return false;
   }
 
-  auto addr_str = KnxGroupAddress::from_eibaddr(group_addr).to_string();
+  const auto addr_str = KnxGroupAddress::from_eibaddr(group_addr).to_string();
 
   DebugLog::knxd_send("group_packet", addr_str, "apdu=" + hex_encode(apdu.data(), apdu.size()));
 
@@ -481,12 +481,13 @@ std::optional<std::vector<uint8_t>> KnxdClient::cache_read(uint16_t group_addr, 
     // stale response fragments corrupt the parsing of our response.
     impl_->cache_read_buffer_.clear();
 
-    auto addr_str = KnxGroupAddress::from_eibaddr(group_addr).to_string();
+    const auto addr_str = KnxGroupAddress::from_eibaddr(group_addr).to_string();
 
     DebugLog::knxd_send("cache_read", addr_str, nowait ? "nowait=true" : "nowait=false");
 
-    uint16_t msg_type = nowait ? EibMessageType::CACHE_READ_NOWAIT : EibMessageType::CACHE_READ;
-    auto msg = nowait ? build_cache_read_nowait(group_addr) : build_cache_read(group_addr);
+    const uint16_t msg_type =
+        nowait ? EibMessageType::CACHE_READ_NOWAIT : EibMessageType::CACHE_READ;
+    const auto msg = nowait ? build_cache_read_nowait(group_addr) : build_cache_read(group_addr);
     if (!write_all(*cache_fd, msg.data(), msg.size()))
       return std::nullopt;  // write failed — connection likely broken, retryable
 

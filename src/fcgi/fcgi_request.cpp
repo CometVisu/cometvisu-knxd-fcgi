@@ -26,7 +26,7 @@ std::string_view FcgiRequest::path() const {
   // Fall back to request_uri minus query string
   std::string_view uri_path;
   if (!request_uri.empty()) {
-    auto qpos = request_uri.find('?');
+    const auto qpos = request_uri.find('?');
     uri_path = (qpos == std::string::npos) ? std::string_view{request_uri}
                                            : std::string_view{request_uri.data(), qpos};
   } else {
@@ -43,7 +43,7 @@ std::string_view FcgiRequest::path() const {
     // SCRIPT_NAME consumes the entire URI path (e.g. SCRIPT_NAME=/cgi-bin/l,
     // uri_path=/cgi-bin/l).  Use the last path component of SCRIPT_NAME
     // itself as the endpoint identifier.
-    auto last_slash = script_name.rfind('/');
+    const auto last_slash = script_name.rfind('/');
     if (last_slash != std::string_view::npos) {
       return std::string_view{script_name}.substr(last_slash);
     }
