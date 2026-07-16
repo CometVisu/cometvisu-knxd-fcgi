@@ -21,12 +21,13 @@
 #include <unistd.h>
 
 #include <cerrno>
-#include <charconv>
 #include <csignal>
+#include <cstdint>
 #include <cstdlib>
 #include <cstring>
 #include <iostream>
 #include <string>
+#include <string_view>
 #include <vector>
 
 #include "fcgi/fcgi_server.h"
@@ -55,6 +56,7 @@ inline constexpr rlim_t kMaxWorkerMemoryBytes = 64ULL * 1024 * 1024;
 // Signal handlers run in a restricted context (only async-signal-safe
 // functions are permitted).  They set volatile flags which the main loop
 // checks at well-defined points.
+// NOLINTNEXTLINE(cppcoreguidelines-avoid-non-const-global-variables)
 volatile sig_atomic_t g_shutdown_requested = 0;
 
 extern "C" void handle_sigterm(int /*signum*/) {
@@ -73,7 +75,7 @@ extern "C" void handle_sigchld(int /*signum*/) {
 /// Set resource limits for long-running embedded operation.
 /// Called once at startup (before fork) so all children inherit the limits.
 void set_resource_limits() {
-  struct rlimit rl;
+  struct rlimit rl {};
 
   // Limit file descriptors to prevent exhaustion from slow leaks.
   rl.rlim_cur = kMaxFileDescriptors;
@@ -97,21 +99,25 @@ void set_resource_limits() {
 /// Read an environment variable with a default value.
 const char* get_env_default(const char* name, const char* default_value) {
   const char* val = getenv(name);
-  return (val != nullptr && val[0] != '\0') ? val : default_value;
+  return (val != nullptr && *val != '\0') ? val : default_value;
 }
 
-/// Parse an integer from an environment variable safely using std::from_chars.
+/// Parse an integer from an environment variable safely using std::strtol.
 /// Returns the parsed value clamped to [min_val, max_val], or default_val on error.
 int parse_env_int(const char* name, int default_val, int min_val, int max_val) {
   const char* val = getenv(name);
-  if (val == nullptr || val[0] == '\0')
+  if (val == nullptr || *val == '\0') {
     return default_val;
-  int result = 0;
-  auto [ptr, ec] = std::from_chars(val, val + std::strlen(val), result);
-  if (ec != std::errc{} || result < min_val)
+  }
+  char* end = nullptr;
+  int64_t raw = std::strtol(val, &end, 10);
+  if (end == val || *end != '\0' || raw < static_cast<int64_t>(min_val)) {
     return default_val;
-  if (result > max_val)
+  }
+  int result = static_cast<int>(raw);
+  if (result > max_val) {
     return max_val;
+  }
   return result;
 }
 
@@ -124,6 +130,7 @@ int main(int argc, char* argv[]) {
   // FastCGI binaries can be run from a terminal for introspection without
   // needing a running web server.
   if (argc > 1) {
+    // NOLINTNEXTLINE(cppcoreguidelines-pro-bounds-pointer-arithmetic)
     const std::string_view arg = argv[1];
     if (arg == "--version" || arg == "-v") {
       std::cout << application_name() << " " << version() << "\n";
@@ -171,15 +178,15 @@ int main(int argc, char* argv[]) {
   // where knxd may close connections asynchronously. The write_all() error
   // handling already copes with EPIPE correctly — it just needs the process
   // to stay alive to handle it.
-  ::signal(SIGPIPE, SIG_IGN);
+  (void)::signal(SIGPIPE, SIG_IGN);
 
   // Handle SIGTERM for graceful shutdown. The parent forwards the signal
   // to all children, waits for them to exit, then exits itself.
-  ::signal(SIGTERM, handle_sigterm);
+  (void)::signal(SIGTERM, handle_sigterm);
 
   // Handle SIGCHLD to reap terminated children immediately, preventing
   // zombie processes from accumulating.
-  ::signal(SIGCHLD, handle_sigchld);
+  (void)::signal(SIGCHLD, handle_sigchld);
 
   // ---- Resource limits for embedded long-running operation ----
   set_resource_limits();
@@ -222,13 +229,13 @@ int main(int argc, char* argv[]) {
   std::cout << "[INFO] Configuration:\n";
   std::cout << "[INFO]   KNXD_SOCKET           " << knxd_socket << "\n";
   std::cout << "[INFO]   FCGI_SOCKET           "
-            << (fcgi_socket[0] != '\0' ? fcgi_socket : "(not set, spawn-fcgi mode)") << "\n";
+            << (*fcgi_socket != '\0' ? fcgi_socket : "(not set, spawn-fcgi mode)") << "\n";
   std::cout << "[INFO]   FCGI_WORKERS          " << num_workers << "\n";
   std::cout << "[INFO]   LONGPOLL_TIMEOUT_SEC  " << longpoll_timeout << "\n";
   std::cout << "[INFO]   ADDRESS_PREFIX        "
-            << (address_prefix[0] != '\0' ? address_prefix : "(not set)") << "\n";
+            << (*address_prefix != '\0' ? address_prefix : "(not set)") << "\n";
   std::cout << "[INFO]   BASE_URL              "
-            << (base_url != nullptr && base_url[0] != '\0' ? base_url : "(not set)") << "\n";
+            << (base_url != nullptr && *base_url != '\0' ? base_url : "(not set)") << "\n";
   std::cout << "[INFO]   KNXD_BINARY           " << knxd_binary << "\n";
   std::cout << "[INFO]   DEBUG_BACKEND         "
             << (getenv("DEBUG_BACKEND") != nullptr ? getenv("DEBUG_BACKEND") : "(not set)") << "\n";
@@ -238,7 +245,7 @@ int main(int argc, char* argv[]) {
   // before attempting the potentially slow knxd connection.
   // In spawn-fcgi mode (no FCGI_SOCKET), the web server handles stdin/stdout.
   FcgiServer server;
-  if (fcgi_socket[0] != '\0') {
+  if (*fcgi_socket != '\0') {
     if (server.listen(fcgi_socket)) {
       std::cout << "[INFO] Direct FCGI socket: " << fcgi_socket << "\n";
     } else {
@@ -282,7 +289,7 @@ int main(int argc, char* argv[]) {
 
   // ---- Run ----
   int result = 0;
-  if (fcgi_socket[0] != '\0') {
+  if (*fcgi_socket != '\0') {
     // Fork-based worker pool: each child process runs an independent
     // accept loop on the shared listen socket. The OS serializes accept()
     // across processes.
@@ -349,7 +356,7 @@ int main(int argc, char* argv[]) {
         // Reset SIGTERM to default in the child so that the PDEATHSIG
         // above actually terminates us (the parent's handler just sets
         // a flag, which the child's accept loop never checks).
-        ::signal(SIGTERM, SIG_DFL);
+        (void)::signal(SIGTERM, SIG_DFL);
 
         // Close the inherited knxd connection.  Each worker
         // opens its own to avoid contention on the shared fd.
@@ -407,7 +414,7 @@ int main(int argc, char* argv[]) {
         ::kill(pid, SIGTERM);
       }
       // Wait for killed children
-      int status;
+      int status = 0;
       for (size_t k = 0; k < worker_pids.size(); ++k) {
         ::wait(&status);
       }
@@ -419,14 +426,16 @@ int main(int argc, char* argv[]) {
       // Wait for all child processes.  When a child exits unexpectedly,
       // log it and continue waiting for others.  When SIGTERM is received,
       // forward it to all children and wait for them to exit gracefully.
-      while (!g_shutdown_requested) {
-        int status;
+      while (g_shutdown_requested == 0) {
+        int status = 0;
         pid_t waited = ::wait(&status);
         if (waited < 0) {
-          if (errno == EINTR)
+          if (errno == EINTR) {
             continue;  // interrupted by signal — check shutdown flag
-          if (errno == ECHILD)
+          }
+          if (errno == ECHILD) {
             break;  // no more children
+          }
           break;
         }
         if (WIFEXITED(status)) {
@@ -445,7 +454,7 @@ int main(int argc, char* argv[]) {
       }
 
       // Shutdown requested: kill remaining children and wait for them
-      if (g_shutdown_requested) {
+      if (g_shutdown_requested != 0) {
         std::cout << "[INFO] Shutdown requested, stopping " << worker_pids.size()
                   << " workers...\n";
         for (pid_t pid : worker_pids) {
@@ -453,7 +462,7 @@ int main(int argc, char* argv[]) {
         }
         // Wait for all children to exit (SIGCHLD handler has already
         // reaped those that exited immediately; this catches the rest).
-        int status;
+        int status = 0;
         while (::wait(&status) > 0) {
         }
       }

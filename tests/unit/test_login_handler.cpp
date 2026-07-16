@@ -36,6 +36,10 @@ public:
     }
   }
   ~ScopedEnvVar() { unsetenv(name_); }
+  ScopedEnvVar(const ScopedEnvVar&) = delete;
+  ScopedEnvVar& operator=(const ScopedEnvVar&) = delete;
+  ScopedEnvVar(ScopedEnvVar&&) = delete;
+  ScopedEnvVar& operator=(ScopedEnvVar&&) = delete;
 
 private:
   const char* name_;
@@ -100,11 +104,13 @@ TEST(LoginHandlerTest, DifferentSessionsAreUnique) {
 
   auto extract_sid = [](const std::string& json) -> std::string {
     auto s = json.find("\"s\":\"");
-    if (s == std::string::npos)
+    if (s == std::string::npos) {
       return "";
+    }
     auto e = json.find('"', s + 5);
-    if (e == std::string::npos)
+    if (e == std::string::npos) {
       return "";
+    }
     return json.substr(s + 5, e - s - 5);
   };
 
