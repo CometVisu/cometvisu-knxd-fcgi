@@ -15,8 +15,7 @@
 
 #include "login_handler.h"
 
-#include <array>
-#include <cstdio>
+#include <cstdlib>
 
 #include "state/session_store.h"
 #include "util/json_builder.h"
@@ -29,32 +28,8 @@ namespace cvknxd {
 /// This is the wire-protocol version, not the software version.
 static constexpr std::string_view kProtocolVersion = "0.0.2";
 
-LoginHandler::LoginHandler(SessionStore& sessions, std::string base_url, std::string knxd_binary)
-    : sessions_(sessions), base_url_(std::move(base_url)), knxd_binary_(std::move(knxd_binary)) {}
-
-std::string LoginHandler::query_knxd_version(const std::string& binary) {
-  // Run `<binary> --version` and return its raw output (trimmed).
-  // knxd may print version info to stderr, so merge both streams.
-  // NOLINTNEXTLINE(cert-env33-c)
-  const std::string cmd = binary + " --version 2>&1";
-  FILE* pipe = popen(cmd.c_str(), "r");  // NOLINT(cert-env33-c)
-  if (pipe == nullptr) {
-    return "";
-  }
-
-  std::array<char, 256> buf{};
-  std::string output;
-  while (std::fgets(buf.data(), buf.size(), pipe) != nullptr) {
-    output += buf.data();
-  }
-  pclose(pipe);
-
-  // Trim trailing whitespace / newlines
-  while (!output.empty() && (output.back() == '\n' || output.back() == '\r')) {
-    output.pop_back();
-  }
-  return output;
-}
+LoginHandler::LoginHandler(SessionStore& sessions, std::string base_url)
+    : sessions_(sessions), base_url_(std::move(base_url)) {}
 
 std::string LoginHandler::handle(std::string_view query_string) {
   const QueryString params{query_string};
@@ -67,7 +42,7 @@ std::string LoginHandler::handle(std::string_view query_string) {
   json.add_string("v", kProtocolVersion);
   json.add_string("s", session_id);
 
-  // Gather version info (compile-time + runtime, lazy cached)
+  // Gather version info (compile-time, lazy cached)
   bool need_config = !base_url_.empty();
   const std::string_view fcgi_ver = version();
   const std::string_view fcgi_hash = git_hash();
@@ -87,10 +62,10 @@ std::string LoginHandler::handle(std::string_view query_string) {
     need_config = true;
   }
 
-  if (cached_knxd_runtime_.empty()) {
-    cached_knxd_runtime_ = query_knxd_version(knxd_binary_);
-  }
-  if (!cached_knxd_runtime_.empty()) {
+  // LOGIN_EXTRA_CONFIG: optional environment variable with raw JSON key-value
+  // pairs to inject into the "c" block (e.g. `"foo":"bar","knxdRuntimeVersion":"1.2.3"`).
+  const char* extra_config = std::getenv("LOGIN_EXTRA_CONFIG");  // NOLINT(concurrency-mt-unsafe)
+  if (extra_config != nullptr && *extra_config != '\0') {
     need_config = true;
   }
 
@@ -114,8 +89,8 @@ std::string LoginHandler::handle(std::string_view query_string) {
     if (!knxd_bhash.empty()) {
       json.add_string("knxdBuildGitHash", knxd_bhash);
     }
-    if (!cached_knxd_runtime_.empty()) {
-      json.add_string("knxdRuntimeVersion", cached_knxd_runtime_);
+    if (extra_config != nullptr && *extra_config != '\0') {
+      json.add_raw(extra_config);
     }
 
     json.end_object();

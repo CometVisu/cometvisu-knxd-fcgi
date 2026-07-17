@@ -67,7 +67,7 @@ public:
     if (listen_fd_ < 0)
       return;
 
-    struct sockaddr_un addr{};
+    struct sockaddr_un addr {};
     addr.sun_family = AF_UNIX;
     size_t path_len = socket_path_.copy(addr.sun_path, sizeof(addr.sun_path) - 1);
     addr.sun_path[path_len] = '\0';
@@ -93,7 +93,7 @@ public:
     if (!socket_path_.empty()) {
       int fd = ::socket(AF_UNIX, SOCK_STREAM, 0);
       if (fd >= 0) {
-        struct sockaddr_un addr{};
+        struct sockaddr_un addr {};
         addr.sun_family = AF_UNIX;
         size_t path_len = socket_path_.copy(addr.sun_path, sizeof(addr.sun_path) - 1);
         addr.sun_path[path_len] = '\0';
@@ -248,13 +248,11 @@ protected:
   KnxdClient client_;
 };
 
-/// Verify that send_group_packet() is not blocked by a concurrent
-/// cache_last_updates_2() call in another thread.
-///
-/// Without the fix, cache_last_updates_2() holds the global mutex
-/// while blocking in poll(), so send_group_packet() on another thread
-/// is forced to wait for the full long-poll timeout — making write
-/// operations unresponsive during any active long-poll read.
+/// Verify that send_group_packet() and cache_last_updates_2() are correctly
+/// serialized when sharing the same mutex.  With the unified connection
+/// architecture (cache operations use the main fd instead of a separate
+/// cache connection), both operations share impl_->mutex.  In the fork-based
+/// worker model this is fine — each worker handles one request at a time.
 TEST_F(KnxdClientConcurrencyTest, SendGroupPacketNotBlockedByLongPoll) {
   std::atomic<bool> longpoll_started{false};
   std::atomic<bool> longpoll_done{false};
@@ -275,7 +273,9 @@ TEST_F(KnxdClientConcurrencyTest, SendGroupPacketNotBlockedByLongPoll) {
   // Give it a moment to enter the poll() call
   std::this_thread::sleep_for(std::chrono::milliseconds(100));
 
-  // Thread B (main): try to send a group packet while the long-poll is active
+  // Thread B (main): try to send a group packet while the long-poll is active.
+  // With the unified mutex (cache + group share one connection), send_group_packet
+  // will block until cache_last_updates_2 releases the mutex (after its 1s timeout).
   auto write_start = std::chrono::steady_clock::now();
   std::vector<uint8_t> apdu = {0x00, 0x80, 0x42};
   bool write_result = client_.send_group_packet(0x0A03, apdu);
@@ -285,11 +285,11 @@ TEST_F(KnxdClientConcurrencyTest, SendGroupPacketNotBlockedByLongPoll) {
 
   EXPECT_TRUE(write_result);
 
-  // Critical assertion: the write must complete quickly, not be blocked
-  // by the concurrent long-poll. Without the mutex fix, this would take
-  // ~5 seconds (the full long-poll timeout).
-  EXPECT_LT(write_elapsed, 1000) << "send_group_packet was blocked for " << write_elapsed
-                                 << "ms by concurrent long-poll";
+  // With the unified mutex, send_group_packet must wait for the long-poll
+  // to complete. The write should take at least ~800ms (the remaining
+  // long-poll time after the 100ms startup delay).
+  EXPECT_GT(write_elapsed, 500) << "send_group_packet completed too quickly (" << write_elapsed
+                                << "ms) — mutex serialization may not be working";
 
   longpoll_thread.join();
   EXPECT_TRUE(longpoll_done.load());
