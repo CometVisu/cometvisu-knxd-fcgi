@@ -50,18 +50,8 @@ add_executable(test_session_store
 target_link_libraries(test_session_store PRIVATE cvknxd_state GTest::gtest GTest::gtest_main)
 add_test(NAME test_session_store COMMAND test_session_store)
 
-# Copy mock knxd version script to build directory so tests can find it
-configure_file(
-    mock_knxd_version.sh
-    ${CMAKE_CURRENT_BINARY_DIR}/mock_knxd_version.sh
-    COPYONLY
-)
-
 add_executable(test_login_handler
     test_login_handler.cpp
-)
-target_compile_definitions(test_login_handler PRIVATE
-    TEST_SOURCE_DIR="${CMAKE_CURRENT_SOURCE_DIR}"
 )
 target_link_libraries(test_login_handler PRIVATE cvknxd_handlers cvknxd_state GTest::gtest GTest::gtest_main)
 add_test(NAME test_login_handler COMMAND test_login_handler)

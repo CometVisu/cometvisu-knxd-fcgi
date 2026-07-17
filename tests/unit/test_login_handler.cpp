@@ -228,24 +228,32 @@ TEST(LoginHandlerTest, ConfigBlockWithBaseUrlIncludesVersionInfo) {
   EXPECT_NE(response.find("\"fcgiGitHash\":"), std::string::npos);
 }
 
-TEST(LoginHandlerTest, KnxdRuntimeVersionIsCached) {
-  // The runtime knxd version is queried via popen("knxd --version").
-  // Test that subsequent calls produce identical output (cached).
+TEST(LoginHandlerTest, LogExtraConfigEnvVar) {
+  // When LOGIN_EXTRA_CONFIG is set, its raw JSON content is injected
+  // into the "c" block of the login response.
   SessionStore sessions;
   LoginHandler handler(sessions);
 
-  std::string r1 = handler.handle("");
-  std::string r2 = handler.handle("");
-  EXPECT_EQ(r1, r2);  // identical output (cached)
+  {
+    ScopedEnvVar set("LOGIN_EXTRA_CONFIG", R"("foo":"bar","knxdRuntimeVersion":"1.2.3")");
+    std::string response = handler.handle("");
+    EXPECT_NE(response.find("\"c\""), std::string::npos);
+    EXPECT_NE(response.find("\"foo\":\"bar\""), std::string::npos);
+    EXPECT_NE(response.find("\"knxdRuntimeVersion\":\"1.2.3\""), std::string::npos);
+  }
+
+  // Without the env var, no extra config is injected
+  std::string response_no_env = handler.handle("");
+  // Still produces version info, but NOT the extra stuff
+  EXPECT_EQ(response_no_env.find("\"foo\":\"bar\""), std::string::npos);
 }
 
-TEST(LoginHandlerTest, KnxdRuntimeVersionFromCustomBinary) {
-  // When a custom knxd binary path is provided, its --version output
-  // should appear as knxdRuntimeVersion in the login response.
+TEST(LoginHandlerTest, LogExtraConfigEmptyIgnored) {
+  // An empty LOGIN_EXTRA_CONFIG must not inject anything.
   SessionStore sessions;
-  const std::string mock_binary = std::string(TEST_SOURCE_DIR) + "/mock_knxd_version.sh";
-  LoginHandler handler(sessions, "", mock_binary);
+  LoginHandler handler(sessions);
 
+  ScopedEnvVar set("LOGIN_EXTRA_CONFIG", "");
   std::string response = handler.handle("");
-  EXPECT_NE(response.find("\"knxdRuntimeVersion\":\"knxd 9.99.99-test\""), std::string::npos);
+  EXPECT_EQ(response.find("\"knxdRuntimeVersion\""), std::string::npos);
 }
