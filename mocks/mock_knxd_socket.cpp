@@ -140,6 +140,13 @@ int MockKnxdClient::get_fd() const {
   return -1;  // mock has no real fd
 }
 
+KnxdClient::WaitResult MockKnxdClient::wait_for_activity(int /*timeout_ms*/) {
+  // Mock: return Timeout to let the read handler fall through to cache checks.
+  // Real implementation polls both fds; for tests we rely on pre-configured
+  // cache results via set_last_updates_result() and set_cached_value().
+  return WaitResult::Timeout;
+}
+
 uint64_t MockKnxdClient::get_telegram_count() const {
   return telegram_count_;
 }
