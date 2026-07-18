@@ -16,7 +16,6 @@
 #include <gtest/gtest.h>
 
 #include "handlers/write_handler.h"
-#include "knxd/knxd_protocol.h"
 #include "mock_knxd_socket.h"
 #include "state/session_store.h"
 
@@ -29,8 +28,8 @@ protected:
     (void)knxd_.open_group_socket(false);
   }
 
-  MockKnxdClient knxd_;
-  SessionStore sessions_;
+  MockKnxdClient knxd_;    // NOLINT(cppcoreguidelines-non-private-member-variables-in-classes)
+  SessionStore sessions_;  // NOLINT(cppcoreguidelines-non-private-member-variables-in-classes)
 };
 
 TEST_F(WriteHandlerTest, WriteSingleAddress) {
