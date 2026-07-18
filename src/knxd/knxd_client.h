@@ -97,6 +97,13 @@ public:
 
   /// Set the socket to non-blocking mode.
   virtual void set_nonblocking(bool enable) = 0;
+
+  /// Wait for activity on either the group socket or cache connection.
+  /// Returns which fd has data, or Timeout if the timeout expired.
+  /// This enables the read handler to receive instant write notifications
+  /// via the group socket (APDU_PACKET) while also waiting for cache updates.
+  enum class WaitResult { Timeout = 0, GroupData = 1, CacheData = 2 };
+  [[nodiscard]] virtual WaitResult wait_for_activity(int timeout_ms) = 0;
 };
 
 /// Real implementation of KnxdClientInterface using Unix sockets.
@@ -127,6 +134,7 @@ public:
   [[nodiscard]] int get_fd() const override;
   [[nodiscard]] uint64_t get_telegram_count() const override;
   void set_nonblocking(bool enable) override;
+  [[nodiscard]] WaitResult wait_for_activity(int timeout_ms) override;
 
 private:
   struct Impl;

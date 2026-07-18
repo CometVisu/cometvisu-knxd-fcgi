@@ -49,6 +49,7 @@ public:
   [[nodiscard]] int get_fd() const override;
   [[nodiscard]] uint64_t get_telegram_count() const override;
   void set_nonblocking(bool enable) override;
+  [[nodiscard]] WaitResult wait_for_activity(int timeout_ms) override;
 
   // ---- Test helpers ----
 

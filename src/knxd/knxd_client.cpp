@@ -265,7 +265,7 @@ bool write_all(int fd, const uint8_t* data, size_t len) {
 inline void shrink_if_large(std::vector<uint8_t>& buf) {
   // NOLINTNEXTLINE(bugprone-implicit-widening-of-multiplication-result)
   if (buf.capacity() > static_cast<size_t>(buf.size()) * 4 ||
-      (buf.capacity() - buf.size()) > 64 * 1024) {
+      (buf.capacity() - buf.size()) > static_cast<size_t>(64 * 1024)) {
     buf.shrink_to_fit();
   }
 }
@@ -773,6 +773,10 @@ std::optional<LastUpdatesResult> KnxdClient::cache_last_updates_2(uint32_t start
         "cache_last_updates_2", "",
         "start=" + std::to_string(start) + " timeout=" + std::to_string(timeout_sec));
 
+    // Clear any residual data from previous cache operations to prevent stale
+    // responses from being consumed as current data.
+    impl_->cache_read_buffer_.clear();
+
     if (!write_all(*cache_fd, msg.data(), msg.size())) {
       return std::nullopt;  // write failed — connection likely broken
     }
@@ -803,62 +807,94 @@ std::optional<LastUpdatesResult> KnxdClient::cache_last_updates_2(uint32_t start
         continue;  // Unknown message on cache connection — skip
       }
 
-      // Need more data
+      // Need more data — poll both the cache connection and the group socket.
+      // EIB_GROUP_PACKET writes (our own writes) don't trigger cache position
+      // notifications in knxd, unlike EIB_OPEN_T_GROUP injections (knxtool).
+      // But knxd DOES forward writes as APDU_PACKET on the group socket
+      // immediately. By polling both fds, we catch our own writes instantly
+      // while also waiting for external cache updates.
       auto remaining = std::chrono::duration_cast<std::chrono::milliseconds>(
                            deadline - std::chrono::steady_clock::now())
                            .count();
       if (remaining <= 0) {
-        return std::nullopt;  // timeout — not a connection error
+        return std::nullopt;
       }
 
-      struct pollfd pfd = {};
-      pfd.fd = *cache_fd;
-      pfd.events = POLLIN;
-      pfd.revents = 0;
+      // Get the group socket fd (without holding mutex during poll)
+      int group_fd = -1;
+      {
+        std::lock_guard<std::recursive_mutex> main_lock(impl_->mutex);
+        group_fd = impl_->fd;
+      }
 
-      int poll_ret = ::poll(&pfd, 1, static_cast<int>(remaining));
+      std::array<struct pollfd, 2> pfds{};
+      pfds[0].fd = *cache_fd;
+      pfds[0].events = POLLIN;
+      int nfds = 1;
+
+      if (group_fd >= 0) {
+        pfds[1].fd = group_fd;
+        pfds[1].events = POLLIN;
+        nfds = 2;
+      }
+
+      int poll_ret = ::poll(pfds.data(), static_cast<nfds_t>(nfds), static_cast<int>(remaining));
       if (poll_ret < 0) {
         if (errno == EINTR) {
           continue;
         }
-        return std::nullopt;  // poll error — connection may be broken
+        return std::nullopt;
       }
       if (poll_ret == 0) {
         return std::nullopt;  // timeout — not a connection error
       }
 
-      if ((pfd.revents & (POLLHUP | POLLERR)) != 0) {
+      // Check if the group socket has data (our own write or external telegram).
+      // We must NOT call poll_group_telegram() here because that would acquire
+      // impl_->mutex while we hold impl_->cache_mutex — wrong lock order.
+      // Instead, return nullopt to signal the read handler that it should drain
+      // group telegrams via its own poll_group_telegram() call at the top of
+      // the poll loop. The read handler will then loop back and re-enter this
+      // function with the remaining time budget.
+      if (nfds >= 2 && (pfds[1].revents & (POLLIN | POLLHUP | POLLERR)) != 0) {
+        return std::nullopt;
+      }
+
+      // Check if the cache connection has data
+      if ((pfds[0].revents & (POLLHUP | POLLERR)) != 0) {
         return std::nullopt;  // connection hangup — retryable
       }
 
-      // NOLINTNEXTLINE(cppcoreguidelines-avoid-c-arrays-modern-cpp)
-      std::array<uint8_t, 4096> tmp{};
-      ssize_t n = ::read(*cache_fd, tmp.data(), tmp.size());
-      if (n > 0) {
-        size_t new_size = impl_->cache_read_buffer_.size() + static_cast<size_t>(n);
-        if (new_size > kMaxReadBufferSize) {
-          size_t excess = new_size - kMaxReadBufferSize;
-          if (excess >= impl_->cache_read_buffer_.size()) {
-            impl_->cache_read_buffer_.clear();
-          } else {
-            impl_->cache_read_buffer_.erase(
-                impl_->cache_read_buffer_.begin(),
-                impl_->cache_read_buffer_.begin() + static_cast<ptrdiff_t>(excess));
+      if ((pfds[0].revents & POLLIN) != 0) {
+        // Read data from cache socket
+        std::array<uint8_t, 4096> tmp{};
+        ssize_t n = ::read(*cache_fd, tmp.data(), tmp.size());
+        if (n > 0) {
+          size_t new_size = impl_->cache_read_buffer_.size() + static_cast<size_t>(n);
+          if (new_size > kMaxReadBufferSize) {
+            size_t excess = new_size - kMaxReadBufferSize;
+            if (excess >= impl_->cache_read_buffer_.size()) {
+              impl_->cache_read_buffer_.clear();
+            } else {
+              impl_->cache_read_buffer_.erase(
+                  impl_->cache_read_buffer_.begin(),
+                  impl_->cache_read_buffer_.begin() + static_cast<ptrdiff_t>(excess));
+            }
           }
+          impl_->cache_read_buffer_.insert(impl_->cache_read_buffer_.end(), tmp.data(),
+                                           &tmp[static_cast<size_t>(n)]);
+          continue;
         }
-        impl_->cache_read_buffer_.insert(impl_->cache_read_buffer_.end(), tmp.data(),
-                                         &tmp[static_cast<size_t>(n)]);
-        continue;
+        if (n == 0) {
+          return std::nullopt;  // EOF — connection closed, retryable
+        }
+        if (errno == EINTR) {
+          continue;
+        }
+        return std::nullopt;  // read error
       }
-      if (n == 0) {
-        return std::nullopt;  // EOF — connection closed, retryable
-      }
-      if (errno == EINTR) {
-        continue;
-      }
-      return std::nullopt;  // read error
-    }
-  };
+    }  // end while
+  };  // end lambda
 
   // First attempt
   auto result = attempt();
@@ -870,6 +906,33 @@ std::optional<LastUpdatesResult> KnxdClient::cache_last_updates_2(uint32_t start
   // so a second attempt may succeed if the first hit a transient error.
   // The deadline is shared, so the retry won't exceed the original time budget.
   return attempt();
+}
+
+KnxdClient::WaitResult KnxdClient::wait_for_activity(int timeout_ms) {
+  // This method is now a simple combined poll without requiring an active
+  // cache request.  The read handler uses it to check for pending group
+  // telegrams BEFORE entering the cache poll.  For cache notifications,
+  // cache_last_updates_2_with_group_poll() handles the combined wait.
+  int group_fd = -1;
+
+  {
+    std::lock_guard<std::recursive_mutex> main_lock(impl_->mutex);
+    group_fd = impl_->fd;
+  }
+
+  if (group_fd < 0) {
+    return WaitResult::Timeout;
+  }
+
+  struct pollfd pfd = {};
+  pfd.fd = group_fd;
+  pfd.events = POLLIN;
+
+  int ret = ::poll(&pfd, 1, timeout_ms);
+  if (ret <= 0) {
+    return WaitResult::Timeout;
+  }
+  return WaitResult::GroupData;
 }
 
 }  // namespace cvknxd
