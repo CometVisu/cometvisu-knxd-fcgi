@@ -338,7 +338,7 @@ FcgiRequest FcgiServer::read_request() {
   // Read FCGI environment variables
   auto get_env = [](const char* name) -> const char* {
     const char* val = getenv(name);
-    return val ? val : "";
+    return val != nullptr ? val : "";
   };
 
   req.request_method = get_env("REQUEST_METHOD");
@@ -420,7 +420,7 @@ FcgiRequest FcgiServer::read_request(char** envp) {
 
   auto get_env_or_empty = [&](const char* name) -> const char* {
     const char* val = get_env(envp, name);
-    return val ? val : "";
+    return val != nullptr ? val : "";
   };
 
   req.request_method = get_env_or_empty("REQUEST_METHOD");
