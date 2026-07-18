@@ -338,10 +338,31 @@ std::optional<std::vector<uint8_t>> KnxdClient::cache_read(uint16_t group_addr, 
   if (!is_connected())
     return std::nullopt;
 
-  // Clear any residual data from previous operations on the shared buffer.
-  // Without this, stale response fragments from cache_last_updates_2 or
-  // earlier cache_read calls would corrupt parsing.
-  impl_->read_buffer_.clear();
+  // Process any pending complete messages in the buffer before sending our
+  // request.  Previous operations (cache_last_updates_2, poll_group_telegram)
+  // may have left complete APDU_PACKET or GROUP_PACKET messages in the shared
+  // buffer.  Processing them now ensures telegrams are counted rather than lost.
+  // We only process interleaved telegrams — stale cache responses from previous
+  // requests are discarded to avoid returning wrong values for this request.
+  while (true) {
+    auto pending = try_extract_message(impl_->read_buffer_);
+    if (!pending.has_value())
+      break;
+    shrink_if_large(impl_->read_buffer_);
+    uint16_t pending_type;
+    std::vector<uint8_t> pending_data;
+    if (!parse_eibd_message(*pending, pending_type, pending_data))
+      continue;
+    if (pending_type == EibMessageType::APDU_PACKET && pending_data.size() >= 6) {
+      impl_->telegram_count_++;
+      continue;
+    }
+    if (pending_type == EibMessageType::GROUP_PACKET && pending_data.size() >= 6) {
+      impl_->telegram_count_++;
+      continue;
+    }
+    // Unknown or stale message — discard
+  }
 
   const auto addr_str = KnxGroupAddress::from_eibaddr(group_addr).to_string();
   DebugLog::knxd_send("cache_read", addr_str, nowait ? "nowait=true" : "nowait=false");
@@ -384,6 +405,18 @@ std::optional<std::vector<uint8_t>> KnxdClient::cache_read(uint16_t group_addr, 
       }
 
       if (resp_type == msg_type && resp_data.size() >= 4) {
+        // Verify the destination address matches the requested group address.
+        // Without this check, a stale cache response from a previous request
+        // could be returned for the wrong address.
+        uint16_t resp_dst = static_cast<uint16_t>((resp_data[2] << 8) | resp_data[3]);
+        if (resp_dst != group_addr) {
+          // Stale response for a different address — discard and continue.
+          DebugLog::knxd_recv("cache_read_stale",
+                              KnxGroupAddress::from_eibaddr(resp_dst).to_string(),
+                              "(discarded, expected " + addr_str + ")");
+          continue;
+        }
+
         if (resp_data.size() == 4) {
           DebugLog::knxd_recv("cache_read_miss", addr_str, "(empty)");
           return std::nullopt;
