@@ -20,8 +20,8 @@
 namespace cvknxd {
 
 Router::Router(KnxdClientInterface& knxd, SessionStore& sessions, int longpoll_timeout_sec,
-               std::string base_url, std::string knxd_binary)
-    : login_handler_(sessions, std::move(base_url), std::move(knxd_binary)),
+               std::string base_url)
+    : login_handler_(sessions, std::move(base_url)),
       read_handler_(knxd, sessions, longpoll_timeout_sec),
       write_handler_(knxd, sessions) {}
 
