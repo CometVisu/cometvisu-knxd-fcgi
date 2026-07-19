@@ -268,8 +268,18 @@ TEST_F(ForkWorkerTest, ForkedWorkersAcceptConnections) {
         0,     // paddingLength
         0      // reserved
     };
+    constexpr unsigned char kEmptyStdin[] = {
+        // FCGI header — STDIN (empty = end of stdin)
+        1,     // version = FCGI_VERSION_1
+        5,     // type = FCGI_STDIN
+        0, 1,  // requestId = 1
+        0, 0,  // contentLength = 0
+        0,     // paddingLength
+        0      // reserved
+    };
     ::write(fd, kBeginRequest, sizeof(kBeginRequest));
     ::write(fd, kEmptyParams, sizeof(kEmptyParams));
+    ::write(fd, kEmptyStdin, sizeof(kEmptyStdin));
 
     ::shutdown(fd, SHUT_RDWR);
     ::close(fd);
