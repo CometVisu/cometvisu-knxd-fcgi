@@ -27,6 +27,7 @@
 #include <cstring>
 #include <mutex>
 #include <queue>
+#include <thread>
 #include <utility>
 
 #include "../util/debug_log.h"
@@ -62,6 +63,14 @@ struct KnxdClient::Impl {
   // Telegrams pre-parsed during cache_read(), already counted.
   // poll_group_telegram() drains this queue first without incrementing the counter.
   std::queue<std::pair<uint16_t, std::vector<uint8_t>>> pre_counted_telegrams_;
+
+  // Timestamp of the last group write, used for inter-write rate limiting.
+  // Prevents the application from flooding knxd's IP tunnel with writes
+  // faster than the tunnel can transmit them.  Without this, multiple rapid
+  // send_group_packet() calls (e.g. from multi-address write requests or
+  // concurrent workers) can overflow knxd's tunnel send queue, causing
+  // retry exhaustion and fatal "Link down, terminating".
+  std::chrono::steady_clock::time_point last_group_write_;
 
   // Mutex serializes access to the main knxd socket connection (fd_).
   // recursive_mutex is used because public methods call each other internally
@@ -364,6 +373,27 @@ bool KnxdClient::open_group_socket(bool write_only) {
 bool KnxdClient::send_group_packet(uint16_t group_addr, const std::vector<uint8_t>& apdu) {
   std::lock_guard<std::recursive_mutex> lock(impl_->mutex);
 
+  // Rate limiting: enforce a minimum interval between consecutive group
+  // writes to prevent flooding knxd's IP tunnel.  When many write requests
+  // arrive simultaneously (e.g. scripted writes, busy UI with 20 workers),
+  // the un-paced tight loop in the write handler sends GROUP_PACKET messages
+  // faster than knxd's IP tunnel can transmit them.  knxd queues them,
+  // latency grows, the tunnel retry timer fires before the remote IP router
+  // can ACK, and after ~5 seconds knxd fatally disconnects with
+  // "Link down, terminating".
+  //
+  // 50 ms per write → 20 writes/s per worker → 400 writes/s across 20
+  // workers.  This is safely below the IP tunnel's practical capacity and
+  // leaves headroom for the KNX bus (TP1: ~50 telegrams/s).
+  constexpr auto kMinWriteInterval = std::chrono::milliseconds(50);
+  if (impl_->last_group_write_.time_since_epoch().count() > 0) {
+    auto now = std::chrono::steady_clock::now();
+    auto elapsed = now - impl_->last_group_write_;
+    if (elapsed < kMinWriteInterval) {
+      std::this_thread::sleep_for(kMinWriteInterval - elapsed);
+    }
+  }
+
   // First attempt: try with current connection
   if (!is_connected() || !impl_->group_socket_open) {
     // Attempt transparent reconnect once
@@ -377,21 +407,24 @@ bool KnxdClient::send_group_packet(uint16_t group_addr, const std::vector<uint8_
   DebugLog::knxd_send("group_packet", addr_str, "apdu=" + hex_encode(apdu.data(), apdu.size()));
 
   auto msg = build_group_packet(group_addr, apdu);
-  if (write_all(impl_->fd, msg.data(), msg.size())) {
-    return true;
+  bool ok = write_all(impl_->fd, msg.data(), msg.size());
+  if (!ok) {
+    // Write failed (e.g. EPIPE after knxd restart while fd was still valid).
+    // Reconnect and retry once.
+    if (!reconnect()) {
+      impl_->last_group_write_ = std::chrono::steady_clock::now();
+      return false;
+    }
+
+    DebugLog::knxd_send("group_packet", addr_str,
+                        "apdu=" + hex_encode(apdu.data(), apdu.size()) + " (retry)");
+
+    msg = build_group_packet(group_addr, apdu);
+    ok = write_all(impl_->fd, msg.data(), msg.size());
   }
 
-  // Write failed (e.g. EPIPE after knxd restart while fd was still valid).
-  // Reconnect and retry once.
-  if (!reconnect()) {
-    return false;
-  }
-
-  DebugLog::knxd_send("group_packet", addr_str,
-                      "apdu=" + hex_encode(apdu.data(), apdu.size()) + " (retry)");
-
-  msg = build_group_packet(group_addr, apdu);
-  return write_all(impl_->fd, msg.data(), msg.size());
+  impl_->last_group_write_ = std::chrono::steady_clock::now();
+  return ok;
 }
 
 void KnxdClient::invalidate_cache() {
