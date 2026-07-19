@@ -176,43 +176,26 @@ protected:
 
   void TearDown() override { unlink(socket_path_.c_str()); }
 
-  /// Shut down the listen socket and wait for all children to exit.
-  /// shutdown(listen_fd_, SHUT_RDWR) causes the underlying socket to become
-  /// unusable, so all children blocked in accept() get ECONNABORTED (not
-  /// EINTR).  This is critical because FCGX_Accept_r() retries on EINTR
-  /// internally, making SIGTERM ineffective at interrupting the accept loop.
-  /// After the socket is shut down, children exit their accept loops naturally
-  /// and _Exit().  A SIGKILL fallback catches any stragglers.
+  /// Close the listen socket and kill all children.
+  /// shutdown(listen_fd_, SHUT_RDWR) is a no-op on listening sockets — it
+  /// does NOT interrupt accept().  SIGTERM is also ineffective because
+  /// FCGX_Accept_r() internally retries on EINTR.  The only reliable way
+  /// to terminate children blocked in the accept loop is SIGKILL, which
+  /// cannot be caught, blocked, or ignored by the process.
   void cleanup_children(const std::vector<pid_t>& children, FcgiServer& server) {
-    // Step 1: Shut down the listen socket so children's accept() fails cleanly.
-    server.shutdown();
+    // Close the listen socket in the parent (children keep their own copies).
+    server.close_listen_socket();
 
-    // Step 2: Wait for children to exit, with SIGKILL as last resort.
-    // Each child has 2 seconds to exit after the socket shutdown.
-    constexpr int kTimeoutMs = 2000;
-    constexpr int kPollIntervalMs = 50;
-    constexpr int kMaxAttempts = kTimeoutMs / kPollIntervalMs;
-
+    // SIGKILL all children — SIGTERM is ignored by FCGX_Accept_r's EINTR loop.
     for (pid_t pid : children) {
-      bool exited = false;
-      for (int attempt = 0; attempt < kMaxAttempts && !exited; ++attempt) {
-        int status;
-        pid_t waited = ::waitpid(pid, &status, WNOHANG);
-        if (waited == pid) {
-          exited = true;
-        } else if (waited < 0 && errno == ECHILD) {
-          exited = true;  // already gone
-        }
-        if (!exited) {
-          usleep(static_cast<useconds_t>(kPollIntervalMs) * 1000);
-        }
-      }
-      if (!exited) {
-        // Hard kill — SIGKILL cannot be caught or ignored
-        ::kill(pid, SIGKILL);
-        int status;
-        ::waitpid(pid, &status, 0);  // block until reaped
-      }
+      ::kill(pid, SIGKILL);
+    }
+
+    // Reap zombies.  SIGKILL is synchronous — the child is dead by the time
+    // kill() returns, so waitpid should not block.
+    int status;
+    for (size_t i = 0; i < children.size(); ++i) {
+      ::wait(&status);
     }
   }
 
