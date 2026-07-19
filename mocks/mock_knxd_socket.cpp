@@ -91,6 +91,14 @@ std::optional<LastUpdatesResult> MockKnxdClient::cache_last_updates_2(uint32_t s
     return std::nullopt;
   }
 
+  // Simulate group socket having data during combined poll: return nullopt
+  // without disconnecting.  The handler should drain group telegrams and
+  // retry.  Checked BEFORE fail_count so they can be used independently.
+  if (nullopt_count_ > 0) {
+    nullopt_count_--;
+    return std::nullopt;
+  }
+
   // Simulate connection failures for testing reconnection resilience.
   // Set connected_=false so the handler can detect the failure via is_connected()
   // and trigger a reconnect().
@@ -179,6 +187,7 @@ void MockKnxdClient::reset() {
   }
   cache_updates_fail_count_ = 0;
   cache_read_fail_count_ = 0;
+  nullopt_count_ = 0;
   cache_last_updates_call_count_ = 0;
 }
 

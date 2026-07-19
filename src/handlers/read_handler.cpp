@@ -214,6 +214,16 @@ ReadResult ReadHandler::handle(std::string_view query_string) {
         // Only break if we found NEW data from group telegrams (not from
         // the initial cache read), so retries below still get a chance.
         if (already_written.size() > pre_count) {
+          // Update lastpos before returning so the i= value in the response
+          // reflects the cache position after the events we just consumed.
+          // Without this, a sequence of blocking reads would each return the
+          // same stale i= value, causing the CometVisu client to receive
+          // redundant data (and the next request would repeat addresses
+          // already delivered).
+          auto pos = knxd_.cache_last_updates_2(lastpos, 0);
+          if (pos.has_value()) {
+            lastpos = pos->new_position;
+          }
           break;
         }
       }

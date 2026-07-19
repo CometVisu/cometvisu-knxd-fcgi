@@ -376,6 +376,36 @@ TEST_F(ReadHandlerTest, RecoversFromCacheUpdatesFailure) {
   EXPECT_NE(result.body.find("\"i\":10"), std::string::npos);
 }
 
+// Verifies that when cache_last_updates_2 returns nullopt (group socket has
+// data) and a matching group telegram is drained, the i= value in the response
+// advances past the input position.  Before the fix, the break in the drain
+// block skipped the lastpos update, so the response returned the same stale
+// i= value — causing the next request to repeat already-delivered addresses.
+TEST_F(ReadHandlerTest, IndexAdvancesWhenGroupTelegramBreaksPoll) {
+  ReadHandler handler(knxd_, sessions_);
+
+  // First cache_last_updates_2 call: returns nullopt without disconnecting,
+  // simulating the combined poll detecting data on the group socket.
+  knxd_.set_cache_last_updates_nullopt_count(1);
+
+  // Matching group telegram — the handler will drain it and find the match.
+  knxd_.enqueue_telegram(0x0A03, {0x00, 0x80, 0x42});  // 1/2/3 = Write, value 0x42
+
+  // Position-query call (cache_last_updates_2(lastpos, 0)): returns the
+  // current cache position after the group telegram was consumed.
+  knxd_.set_last_updates_result(0, {}, 2607);
+
+  auto result = handler.handle("a=1/2/3&i=2606");
+
+  EXPECT_EQ(result.http_status, 200);
+  // Must include the value from the group telegram
+  EXPECT_NE(result.body.find("1/2/3"), std::string::npos);
+  EXPECT_NE(result.body.find("42"), std::string::npos);
+  // i must have advanced — NOT stuck at the input value 2606
+  EXPECT_NE(result.body.find("\"i\":2607"), std::string::npos);
+  EXPECT_EQ(result.body.find("\"i\":2606"), std::string::npos);
+}
+
 TEST_F(ReadHandlerTest, RecoversFromCacheReadFailureInPollLoop) {
   // Simulates knxd restart during the cache_read that follows a successful
   // cache_last_updates_2.

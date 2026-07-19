@@ -96,6 +96,13 @@ public:
   /// After N failures, connect() returns connection_success_.
   void set_connect_fail_count(int count) { connect_fail_count_ = count; }
 
+  /// Make the next N calls to cache_last_updates_2 return nullopt WITHOUT
+  /// disconnecting (connected_ stays true).  Simulates the group socket
+  /// having data during the combined poll — the caller should drain group
+  /// telegrams and retry.  Unlike set_cache_last_updates_fail_count(),
+  /// this does NOT set connected_=false.
+  void set_cache_last_updates_nullopt_count(int count) { nullopt_count_ = count; }
+
   /// Get the number of times cache_last_updates_2 was called since last reset.
   [[nodiscard]] int cache_last_updates_call_count() const { return cache_last_updates_call_count_; }
 
@@ -122,6 +129,7 @@ private:
   int cache_updates_fail_count_ = 0;
   int cache_read_fail_count_ = 0;
   int send_fail_count_ = 0;
+  int nullopt_count_ = 0;  // return nullopt without disconnecting
 
   // Call counter for verifying retry behavior
   int cache_last_updates_call_count_ = 0;
