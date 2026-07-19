@@ -162,14 +162,9 @@ ReadResult ReadHandler::handle(std::string_view query_string) {
   }
 
   // ---- Poll loop (COMET/long-poll) ----
-  // Original: while ((!written || lastpos < 1) && difftime(time(NULL), tstart) < timeout)
-  // - Continue while nothing written OR this was an initial request
-  // - Stop when timeout elapses
   auto tstart = std::chrono::steady_clock::now();
-
-  // Retry counter for transient cache failures.
-  int nullopt_retries = 0;
-  static constexpr int kMaxNulloptRetries = 5;
+  int timeout_retries = 0;
+  static constexpr int kMaxTimeoutRetries = 3;
 
   while ((!written || lastpos < 1) && timeout_sec > 0) {
     // Calculate remaining time
@@ -181,52 +176,34 @@ ReadResult ReadHandler::handle(std::string_view query_string) {
       break;
     }
 
-    // ---- Main poll: cache updates + group socket (combined) ----
-    // cache_last_updates_2 now polls both the cache connection and the group
-    // socket simultaneously.  EIB_GROUP_PACKET writes (our own writes) don't
-    // trigger cache position notifications, but they DO arrive as APDU_PACKET
-    // on the group socket.  The combined poll detects them instantly.
-    const auto updates = knxd_.cache_last_updates_2(lastpos, remaining);
-    if (!updates.has_value()) {
-      // cache_last_updates_2 can return nullopt for:
-      // 1. Group socket has data (own write arrived) — drain and continue
-      // 2. Transient cache failure — retry if time remains
-      // 3. Connection error — reconnect and retry
-      // 4. Timeout — break
-
-      // Drain group telegrams (handles case 1: our own write)
-      {
-        const size_t pre_count = already_written.size();
-        uint16_t telegram_addr = 0;
-        std::vector<uint8_t> telegram_apdu;
-        while (knxd_.poll_group_telegram(telegram_addr, telegram_apdu)) {
-          if (eib_addrs.contains(telegram_addr) && !already_written.contains(telegram_addr)) {
-            ApduType apdu_type{};
-            std::vector<uint8_t> value_data;
-            if (parse_apdu(telegram_apdu, apdu_type, value_data) && apdu_type != ApduType::Read) {
-              json.add_string(addr_key(telegram_addr),
-                              hex_encode(value_data.data(), value_data.size()));
-              already_written.insert(telegram_addr);
-              written = true;
-            }
+    // ---- Step 1: Drain group telegrams BEFORE the cache poll. ----
+    // Own writes arrive as APDU_PACKET on the group socket.  Draining them
+    // first ensures cache_last_updates_2 receives knxd's authoritative
+    // position (which may have advanced due to these writes) instead of
+    // being interrupted and returning nullopt.
+    {
+      uint16_t telegram_addr = 0;
+      std::vector<uint8_t> telegram_apdu;
+      while (knxd_.poll_group_telegram(telegram_addr, telegram_apdu)) {
+        if (eib_addrs.contains(telegram_addr) && !already_written.contains(telegram_addr)) {
+          ApduType apdu_type{};
+          std::vector<uint8_t> value_data;
+          if (parse_apdu(telegram_apdu, apdu_type, value_data) && apdu_type != ApduType::Read) {
+            json.add_string(addr_key(telegram_addr),
+                            hex_encode(value_data.data(), value_data.size()));
+            already_written.insert(telegram_addr);
+            written = true;
           }
-        }
-        // Only break if we found NEW data from group telegrams (not from
-        // the initial cache read), so retries below still get a chance.
-        if (already_written.size() > pre_count) {
-          // Update lastpos before returning so the i= value in the response
-          // reflects the cache position after the events we just consumed.
-          // Without this, a sequence of blocking reads would each return the
-          // same stale i= value, causing the CometVisu client to receive
-          // redundant data (and the next request would repeat addresses
-          // already delivered).
-          auto pos = knxd_.cache_last_updates_2(lastpos, 0);
-          if (pos.has_value()) {
-            lastpos = pos->new_position;
-          }
-          break;
         }
       }
+    }
+
+    // ---- Step 2: Poll knxd's cache for position updates. ----
+    // This returns knxd's AUTHORITATIVE position — we never fabricate i=.
+    const auto updates = knxd_.cache_last_updates_2(lastpos, remaining);
+    if (!updates.has_value()) {
+      if (written)
+        break;
 
       if (!knxd_.is_connected()) {
         const auto now = std::chrono::steady_clock::now();
@@ -238,20 +215,20 @@ ReadResult ReadHandler::handle(std::string_view query_string) {
           continue;
         }
       }
-      if (remaining > 0 && nullopt_retries < kMaxNulloptRetries) {
-        nullopt_retries++;
+      // Transient failure with retries remaining — brief sleep and retry.
+      if (remaining > 1 && timeout_retries < kMaxTimeoutRetries) {
+        timeout_retries++;
         std::this_thread::sleep_for(std::chrono::milliseconds(100));
         continue;
       }
       break;
     }
 
-    // Successful call — reset retry counter
-    nullopt_retries = 0;
-
+    // Successful call — position from knxd (authoritative).
+    timeout_retries = 0;
     lastpos = updates->new_position;
 
-    // Process all changed addresses
+    // ---- Step 3: Process changed addresses from knxd's cache. ----
     for (const auto changed_addr : updates->changed_addresses) {
       if (!eib_addrs.contains(changed_addr)) {
         continue;
@@ -267,9 +244,8 @@ ReadResult ReadHandler::handle(std::string_view query_string) {
       }
     }
 
-    // After processing cache updates, drain group telegrams that arrived
-    // during the cache poll (belt-and-suspenders for instant write detection).
-    bool found_in_group = false;
+    // ---- Step 4: Belt-and-suspenders drain (group telegrams that arrived
+    // during the cache poll, after knxd reported its position). ----
     {
       uint16_t telegram_addr = 0;
       std::vector<uint8_t> telegram_apdu;
@@ -282,23 +258,12 @@ ReadResult ReadHandler::handle(std::string_view query_string) {
                             hex_encode(value_data.data(), value_data.size()));
             already_written.insert(telegram_addr);
             written = true;
-            found_in_group = true;
           }
         }
       }
     }
 
     if (written) {
-      // If group telegrams contributed new data, they arrived after
-      // cache_last_updates_2 returned — at positions beyond
-      // updates->new_position.  Query the current position so i=
-      // advances past these events.
-      if (found_in_group) {
-        auto pos = knxd_.cache_last_updates_2(lastpos, 0);
-        if (pos.has_value()) {
-          lastpos = pos->new_position;
-        }
-      }
       break;
     }
   }
