@@ -421,3 +421,32 @@ TEST_F(KnxdClientConcurrencyTest, SendGroupPacketAfterCacheReadTwice) {
   EXPECT_EQ(packets[1].group_addr, 0x0C05);
   EXPECT_EQ(packets[1].apdu, apdu2);
 }
+
+/// Verify that rapid consecutive send_group_packet() calls are rate-limited.
+/// The inter-write delay (50 ms) prevents the application from flooding knxd's
+/// IP tunnel, which would otherwise cause retry exhaustion and fatal
+/// "Link down, terminating" errors.
+TEST_F(KnxdClientConcurrencyTest, RapidWritesAreRateLimited) {
+  constexpr int kWrites = 5;
+  constexpr auto kMinInterval = std::chrono::milliseconds(50);
+
+  std::vector<uint8_t> apdu = {0x00, 0x80, 0x42};
+
+  auto start = std::chrono::steady_clock::now();
+  for (int i = 0; i < kWrites; ++i) {
+    EXPECT_TRUE(client_.send_group_packet(0x0A03, apdu));
+  }
+  auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
+      std::chrono::steady_clock::now() - start);
+
+  // With 50 ms minimum interval, 5 writes should take at least
+  // 4 × 50 ms = 200 ms.  Allow 20% tolerance for scheduler jitter.
+  EXPECT_GE(elapsed.count(), (kWrites - 1) * kMinInterval.count() * 80 / 100)
+      << "Expected at least " << ((kWrites - 1) * kMinInterval.count() * 80 / 100) << " ms for "
+      << kWrites << " writes, but took " << elapsed.count() << " ms";
+
+  // All packets must have been received by the fake server.
+  std::this_thread::sleep_for(std::chrono::milliseconds(50));
+  auto packets = fake_knxd_.received_packets();
+  EXPECT_EQ(packets.size(), kWrites);
+}

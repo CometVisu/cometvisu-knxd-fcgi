@@ -176,22 +176,43 @@ protected:
 
   void TearDown() override { unlink(socket_path_.c_str()); }
 
-  /// Kill all children and wait for them to exit.
-  void cleanup_children(const std::vector<pid_t>& children) {
-    // Signal children to stop
+  /// Shut down the listen socket and wait for all children to exit.
+  /// shutdown(listen_fd_, SHUT_RDWR) causes the underlying socket to become
+  /// unusable, so all children blocked in accept() get ECONNABORTED (not
+  /// EINTR).  This is critical because FCGX_Accept_r() retries on EINTR
+  /// internally, making SIGTERM ineffective at interrupting the accept loop.
+  /// After the socket is shut down, children exit their accept loops naturally
+  /// and _Exit().  A SIGKILL fallback catches any stragglers.
+  void cleanup_children(const std::vector<pid_t>& children, FcgiServer& server) {
+    // Step 1: Shut down the listen socket so children's accept() fails cleanly.
+    server.shutdown();
+
+    // Step 2: Wait for children to exit, with SIGKILL as last resort.
+    // Each child has 2 seconds to exit after the socket shutdown.
+    constexpr int kTimeoutMs = 2000;
+    constexpr int kPollIntervalMs = 50;
+    constexpr int kMaxAttempts = kTimeoutMs / kPollIntervalMs;
+
     for (pid_t pid : children) {
-      ::kill(pid, SIGTERM);
-    }
-    // Give them a moment to exit
-    usleep(50000);
-    // Force-kill any stragglers
-    for (pid_t pid : children) {
-      ::kill(pid, SIGKILL);
-    }
-    // Wait for all
-    int status;
-    for (size_t i = 0; i < children.size(); ++i) {
-      ::wait(&status);
+      bool exited = false;
+      for (int attempt = 0; attempt < kMaxAttempts && !exited; ++attempt) {
+        int status;
+        pid_t waited = ::waitpid(pid, &status, WNOHANG);
+        if (waited == pid) {
+          exited = true;
+        } else if (waited < 0 && errno == ECHILD) {
+          exited = true;  // already gone
+        }
+        if (!exited) {
+          usleep(static_cast<useconds_t>(kPollIntervalMs) * 1000);
+        }
+      }
+      if (!exited) {
+        // Hard kill — SIGKILL cannot be caught or ignored
+        ::kill(pid, SIGKILL);
+        int status;
+        ::waitpid(pid, &status, 0);  // block until reaped
+      }
     }
   }
 
@@ -268,8 +289,21 @@ TEST_F(ForkWorkerTest, ForkedWorkersAcceptConnections) {
         0,     // paddingLength
         0      // reserved
     };
-    ::write(fd, kBeginRequest, sizeof(kBeginRequest));
-    ::write(fd, kEmptyParams, sizeof(kEmptyParams));
+    constexpr unsigned char kEmptyStdin[] = {
+        // FCGI header — STDIN (empty = end of stdin)
+        1,     // version = FCGI_VERSION_1
+        5,     // type = FCGI_STDIN
+        0, 1,  // requestId = 1
+        0, 0,  // contentLength = 0
+        0,     // paddingLength
+        0      // reserved
+    };
+    ssize_t begin_written = ::write(fd, kBeginRequest, sizeof(kBeginRequest));
+    (void)begin_written;
+    ssize_t params_written = ::write(fd, kEmptyParams, sizeof(kEmptyParams));
+    (void)params_written;
+    ssize_t stdin_written = ::write(fd, kEmptyStdin, sizeof(kEmptyStdin));
+    (void)stdin_written;
 
     ::shutdown(fd, SHUT_RDWR);
     ::close(fd);
@@ -281,8 +315,8 @@ TEST_F(ForkWorkerTest, ForkedWorkersAcceptConnections) {
         << "Child " << i << " (pid=" << children[i] << ") died unexpectedly";
   }
 
-  // Kill and clean up children
-  cleanup_children(children);
+  // Shut down listen socket and clean up children
+  cleanup_children(children, server);
 }
 
 // ------------------------------------------------------------------
@@ -339,7 +373,7 @@ TEST_F(ForkWorkerTest, ForkFailureIsReported) {
 
   // Clean up any children that were successfully forked before failure
   if (!children.empty()) {
-    cleanup_children(children);
+    cleanup_children(children, server);
   }
 }
 
