@@ -762,7 +762,9 @@ std::optional<LastUpdatesResult> KnxdClient::cache_last_updates_2(uint32_t start
   // with the remaining time. We track the deadline outside the retry loop.
   auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(timeout_sec + 5);
 
-  auto attempt = [&]() -> std::optional<LastUpdatesResult> {
+  // NOLINTNEXTLINE(bugprone-easily-swappable-parameters)
+  auto attempt = [&](bool& group_socket_data) -> std::optional<LastUpdatesResult> {
+    group_socket_data = false;  // reset on each call
     auto* cache_fd = ensure_cache_connection();
     if (cache_fd == nullptr) {
       return std::nullopt;
@@ -857,6 +859,9 @@ std::optional<LastUpdatesResult> KnxdClient::cache_last_updates_2(uint32_t start
       // the poll loop. The read handler will then loop back and re-enter this
       // function with the remaining time budget.
       if (nfds >= 2 && (pfds[1].revents & (POLLIN | POLLHUP | POLLERR)) != 0) {
+        // Group socket has data — signal the caller that this is NOT a
+        // connection error and should not trigger a retry.
+        group_socket_data = true;
         return std::nullopt;
       }
 
@@ -896,16 +901,33 @@ std::optional<LastUpdatesResult> KnxdClient::cache_last_updates_2(uint32_t start
     }  // end while
   };  // end lambda
 
-  // First attempt
-  auto result = attempt();
+  // First attempt.
+  // group_data tracks whether the attempt returned nullopt because the group
+  // socket has data (our own write arrived as APDU_PACKET).  In that case
+  // we must NOT retry — retrying would send a duplicate CACHE_LAST_UPDATES_2
+  // to knxd on the same cache connection, wasting resources and potentially
+  // overwhelming knxd (especially with 20 workers).  The read handler will
+  // drain the group telegrams and loop back.
+  bool group_data = false;
+  auto result = attempt(group_data);
   if (result.has_value()) {
     return result;
   }
 
-  // Retry once — ensure_cache_connection always opens a fresh connection,
-  // so a second attempt may succeed if the first hit a transient error.
-  // The deadline is shared, so the retry won't exceed the original time budget.
-  return attempt();
+  // Only retry on transient cache connection errors, not on group socket data.
+  // Group socket data means our own write arrived — the read handler above us
+  // will drain group telegrams and retry the entire cache_last_updates_2 call
+  // with the remaining time budget.  Sending a second CACHE_LAST_UPDATES_2 here
+  // would just waste knxd's time and discard the response to the first request
+  // (the buffer is cleared by ensure_cache_connection in the second attempt).
+  if (group_data) {
+    return std::nullopt;
+  }
+
+  // Retry once for transient cache connection errors.
+  // The deadline is shared across attempts so the original time budget is
+  // not exceeded.
+  return attempt(group_data);
 }
 
 KnxdClient::WaitResult KnxdClient::wait_for_activity(int timeout_ms) {
