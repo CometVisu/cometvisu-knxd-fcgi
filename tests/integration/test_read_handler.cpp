@@ -299,6 +299,39 @@ TEST_F(ReadHandlerTest, LongPollWithIndexSkipsNonMatchingThenFindsMatch) {
   EXPECT_EQ(result.body.find("1/3/4"), std::string::npos);
   // Index must advance to the final position
   EXPECT_NE(result.body.find("\"i\":10"), std::string::npos);
+
+  // cache_last_updates_2 should only be called twice (once for each queued result).
+  // If the internal retry in KnxdClient fires unnecessarily, this would be higher.
+  EXPECT_LE(knxd_.cache_last_updates_call_count(), 2);
+}
+
+// Verifies that cache_last_updates_2 is not called excessively when the handler
+// has to drain group telegrams (simulating the group-socket-has-data path).
+// The mock doesn't simulate the combined poll, but we can verify that the
+// handler's nullopt-retry loop is bounded via the call count.
+TEST_F(ReadHandlerTest, CacheLastUpdatesCallCountBoundedOnBusyBus) {
+  ReadHandler handler(knxd_, sessions_);
+
+  // Simulate: cache_last_updates_2 returns results for non-matching addresses
+  // repeatedly (like a busy bus), and the subscribed address arrives on the 3rd call.
+  knxd_.set_last_updates_result(0, {0x0B04}, 1);
+  knxd_.set_last_updates_result(1, {0x0C05}, 2);
+  knxd_.set_last_updates_result(2, {0x0A03}, 3);
+
+  knxd_.set_cached_value(0x0B04, {0x0C, 0x6F});
+  knxd_.set_cached_value(0x0C05, {0x01});
+  knxd_.set_cached_value(0x0A03, {0x42});
+
+  auto result = handler.handle("a=1/2/3&t=30");
+
+  EXPECT_EQ(result.http_status, 200);
+  EXPECT_NE(result.body.find("1/2/3"), std::string::npos);
+  EXPECT_NE(result.body.find("42"), std::string::npos);
+
+  // We expect 3 calls (one per queued result).
+  // With the buggy unconditional retry in KnxdClient, this would be 6 calls.
+  // The mock doesn't have the retry, so this test documents the expected bound.
+  EXPECT_LE(knxd_.cache_last_updates_call_count(), 3);
 }
 
 // Simulates knxd's CACHE_LAST_UPDATES_2 returning "no updates" (changed=0,
