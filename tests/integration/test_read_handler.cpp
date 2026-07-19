@@ -203,11 +203,14 @@ TEST_F(ReadHandlerTest, IndexIncluded) {
   ReadHandler handler(knxd_, sessions_);
 
   knxd_.set_cached_value(0x0A03, {0x42});
+  // cache_last_updates_2 returns knxd's authoritative position
+  knxd_.set_last_updates_result(0, {}, 1);
+
   auto result = handler.handle("a=1/2/3&t=30");
 
   EXPECT_EQ(result.http_status, 200);
-  // Index starts at 0 (no telegrams received yet)
-  EXPECT_NE(result.body.find("\"i\":0"), std::string::npos);
+  // i comes from knxd: position 1
+  EXPECT_NE(result.body.find("\"i\":1"), std::string::npos);
 }
 
 TEST_F(ReadHandlerTest, IndexIncrementsAfterTelegram) {
@@ -376,62 +379,112 @@ TEST_F(ReadHandlerTest, RecoversFromCacheUpdatesFailure) {
   EXPECT_NE(result.body.find("\"i\":10"), std::string::npos);
 }
 
-// Verifies that when cache_last_updates_2 returns nullopt (group socket has
-// data) and a matching group telegram is drained, the i= value in the response
-// advances past the input position.  Before the fix, the break in the drain
-// block skipped the lastpos update, so the response returned the same stale
-// i= value — causing the next request to repeat already-delivered addresses.
-TEST_F(ReadHandlerTest, IndexAdvancesWhenGroupTelegramBreaksPoll) {
+// ==========================================================================
+// Tests for the new architecture: group telegrams drained BEFORE cache poll.
+// The i= value always comes from knxd (authoritative), never fabricated.
+// ==========================================================================
+
+/// Group telegram arrives, then cache_last_updates_2 returns knxd's position.
+/// The i= value is knxd's authoritative position, not a synthetic advance.
+TEST_F(ReadHandlerTest, GroupDrainBeforeCachePollReturnsKnxdPosition) {
   ReadHandler handler(knxd_, sessions_);
 
-  // First cache_last_updates_2 call: returns nullopt without disconnecting,
-  // simulating the combined poll detecting data on the group socket.
-  knxd_.set_cache_last_updates_nullopt_count(1);
+  // Group telegram for a matching address — drained in Step 1.
+  knxd_.enqueue_telegram(0x0A03, {0x00, 0x80, 0x42});
+  // cache_last_updates_2 returns knxd's authoritative position.
+  knxd_.set_last_updates_result(0, {}, 105);
 
-  // Matching group telegram — the handler will drain it and find the match.
-  knxd_.enqueue_telegram(0x0A03, {0x00, 0x80, 0x42});  // 1/2/3 = Write, value 0x42
-
-  // Position-query call (cache_last_updates_2(lastpos, 0)): returns the
-  // current cache position after the group telegram was consumed.
-  knxd_.set_last_updates_result(0, {}, 2607);
-
-  auto result = handler.handle("a=1/2/3&i=2606");
-
-  EXPECT_EQ(result.http_status, 200);
-  // Must include the value from the group telegram
-  EXPECT_NE(result.body.find("1/2/3"), std::string::npos);
-  EXPECT_NE(result.body.find("42"), std::string::npos);
-  // i must have advanced — NOT stuck at the input value 2606
-  EXPECT_NE(result.body.find("\"i\":2607"), std::string::npos);
-  EXPECT_EQ(result.body.find("\"i\":2606"), std::string::npos);
-}
-
-// Verifies that the i= value advances when the "belt-and-suspenders" group
-// telegram drain (after a successful cache_last_updates_2) finds new data.
-// Without the fix, cache_last_updates_2 returns position X, then group
-// telegrams at positions X+1..X+N are drained, but lastpos stays at X.
-TEST_F(ReadHandlerTest, IndexAdvancesWhenGroupTelegramAfterCacheUpdate) {
-  ReadHandler handler(knxd_, sessions_);
-
-  // cache_last_updates_2 succeeds with an empty result at position 2606.
-  // (No changed addresses, but the position is reported.)
-  knxd_.set_last_updates_result(2606, {}, 2606);
-
-  // Group telegram for a matching address — arrived after the cache poll.
-  knxd_.enqueue_telegram(0x0A03, {0x00, 0x80, 0x42});  // 1/2/3 = Write 0x42
-
-  // Position-query result: position has advanced past the group telegram.
-  knxd_.set_last_updates_result(0, {}, 2608);
-
-  auto result = handler.handle("a=1/2/3&i=2606");
+  auto result = handler.handle("a=1/2/3&i=100");
 
   EXPECT_EQ(result.http_status, 200);
   EXPECT_NE(result.body.find("1/2/3"), std::string::npos);
   EXPECT_NE(result.body.find("42"), std::string::npos);
-  // i must advance past 2606 — the group telegram is at position >= 2607
-  EXPECT_NE(result.body.find("\"i\":2608"), std::string::npos);
-  EXPECT_EQ(result.body.find("\"i\":2606"), std::string::npos);
+  // i comes from knxd (105), not fabricated
+  EXPECT_NE(result.body.find("\"i\":105"), std::string::npos);
 }
+
+// ==========================================================================
+// Systematic path tests — every code path through the poll loop.
+// ==========================================================================
+
+static uint32_t extractI_path(const std::string& body) {
+  auto p = body.find("\"i\":");
+  if (p == std::string::npos)
+    return 0;
+  p += 4;
+  auto e = body.find_first_of(",}", p);
+  if (e == std::string::npos)
+    return 0;
+  return static_cast<uint32_t>(std::stoul(body.substr(p, e - p)));
+}
+
+namespace {
+void SetupPath1(MockKnxdClient& k) {
+  k.set_cached_value(0x0A03, {0x42});
+  k.set_last_updates_result(0, {}, 10);
+}
+void SetupPath2(MockKnxdClient& k) {
+  k.set_last_updates_result(5, {0x0A03}, 10);
+  k.set_cached_value(0x0A03, {0x42});
+}
+void SetupPath3(MockKnxdClient& k) {
+  k.enqueue_telegram(0x0A03, {0x00, 0x80, 0x42});
+  k.set_last_updates_result(0, {}, 105);
+}
+void SetupPath4(MockKnxdClient& k) {
+  k.set_last_updates_result(5, {0x0B04}, 7);
+  k.set_last_updates_result(7, {0x0A03}, 10);
+  k.set_cached_value(0x0B04, {0x0C, 0x6F});
+  k.set_cached_value(0x0A03, {0x42});
+}
+void SetupPath5(MockKnxdClient& k) {
+  k.enqueue_telegram(0x0A03, {0x00, 0x80, 0x42});
+  k.set_last_updates_result(0, {}, 2608);
+}
+void SetupPath6(MockKnxdClient& k) {
+  k.enqueue_telegram(0x0A03, {0x00, 0x80, 0x42});
+  k.set_last_updates_result(0, {}, 526);
+}
+void SetupPath7(MockKnxdClient& k) {
+  k.enqueue_telegram(0x0A03, {0x00, 0x80, 0x42});
+  k.set_last_updates_result(0, {}, 42);
+}
+}  // namespace
+
+#define TEST_PATH(N, query, expect)                                                      \
+  TEST_F(ReadHandlerTest, Path##N) {                                                     \
+    SetupPath##N(knxd_);                                                                 \
+    ReadHandler h(knxd_, sessions_);                                                     \
+    auto r = h.handle(query);                                                            \
+    EXPECT_EQ(r.http_status, 200);                                                       \
+    if (expect) {                                                                        \
+      EXPECT_NE(r.body.find("42"), std::string::npos) << "Path" #N ": expected data";    \
+    }                                                                                    \
+    uint32_t i = extractI_path(r.body);                                                  \
+    uint32_t req_i = 0;                                                                  \
+    auto ip = std::string(query).find("i=");                                             \
+    if (ip != std::string::npos)                                                         \
+      req_i = static_cast<uint32_t>(std::stoul(std::string(query).substr(ip + 2)));      \
+    if (r.body.find("\"d\":{}") == std::string::npos) {                                  \
+      EXPECT_GE(i, req_i) << "Path" #N ": i=" << i << " must be >= request i=" << req_i; \
+    }                                                                                    \
+    EXPECT_GE(i, req_i) << "Path" #N ": i must never go backward";                       \
+  }
+
+// Path 1: Initial read (i=0), cache hit → position from cache_last_updates_2
+TEST_PATH(1, "a=1/2/3&t=30", true)
+// Path 2: i=5, cache_last_updates_2 succeeds with matching address at pos 10
+TEST_PATH(2, "a=1/2/3&i=5&t=30", true)
+// Path 3: i=100, group telegram drained before cache poll, knxd pos=105
+TEST_PATH(3, "a=1/2/3&i=100", true)
+// Path 4: i=5, first non-matching then matching address
+TEST_PATH(4, "a=1/2/3&i=5", true)
+// Path 5: i=2606, group telegram drained before cache poll, knxd pos=2608
+TEST_PATH(5, "a=1/2/3&i=2606&t=30", true)
+// Path 6: i=525, group telegram drained before cache poll, knxd pos=526
+TEST_PATH(6, "a=1/2/3&i=525", true)
+// Path 7: i=42, group telegram drained, knxd reports same position 42
+TEST_PATH(7, "a=1/2/3&i=42&t=30", true)
 
 TEST_F(ReadHandlerTest, RecoversFromCacheReadFailureInPollLoop) {
   // Simulates knxd restart during the cache_read that follows a successful

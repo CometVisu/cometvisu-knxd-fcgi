@@ -810,9 +810,7 @@ std::optional<LastUpdatesResult> KnxdClient::cache_last_updates_2(uint32_t start
   // with the remaining time. We track the deadline outside the retry loop.
   auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(timeout_sec + 5);
 
-  // NOLINTNEXTLINE(bugprone-easily-swappable-parameters)
-  auto attempt = [&](bool& group_socket_data) -> std::optional<LastUpdatesResult> {
-    group_socket_data = false;  // reset on each call
+  auto attempt = [&]() -> std::optional<LastUpdatesResult> {
     auto* cache_fd = ensure_cache_connection();
     if (cache_fd == nullptr) {
       return std::nullopt;
@@ -857,12 +855,11 @@ std::optional<LastUpdatesResult> KnxdClient::cache_last_updates_2(uint32_t start
         continue;  // Unknown message on cache connection — skip
       }
 
-      // Need more data — poll both the cache connection and the group socket.
-      // EIB_GROUP_PACKET writes (our own writes) don't trigger cache position
-      // notifications in knxd, unlike EIB_OPEN_T_GROUP injections (knxtool).
-      // But knxd DOES forward writes as APDU_PACKET on the group socket
-      // immediately. By polling both fds, we catch our own writes instantly
-      // while also waiting for external cache updates.
+      // Need more data — poll ONLY the cache connection.
+      // The group socket is drained separately by the read handler
+      // before calling cache_last_updates_2, so we don't need to
+      // poll it here.  This ensures the returned position always
+      // comes from knxd (authoritative), never fabricated.
       auto remaining = std::chrono::duration_cast<std::chrono::milliseconds>(
                            deadline - std::chrono::steady_clock::now())
                            .count();
@@ -870,25 +867,12 @@ std::optional<LastUpdatesResult> KnxdClient::cache_last_updates_2(uint32_t start
         return std::nullopt;
       }
 
-      // Get the group socket fd (without holding mutex during poll)
-      int group_fd = -1;
-      {
-        std::lock_guard<std::recursive_mutex> main_lock(impl_->mutex);
-        group_fd = impl_->fd;
-      }
+      struct pollfd pfd = {};
+      pfd.fd = *cache_fd;
+      pfd.events = POLLIN;
+      pfd.revents = 0;
 
-      std::array<struct pollfd, 2> pfds{};
-      pfds[0].fd = *cache_fd;
-      pfds[0].events = POLLIN;
-      int nfds = 1;
-
-      if (group_fd >= 0) {
-        pfds[1].fd = group_fd;
-        pfds[1].events = POLLIN;
-        nfds = 2;
-      }
-
-      int poll_ret = ::poll(pfds.data(), static_cast<nfds_t>(nfds), static_cast<int>(remaining));
+      int poll_ret = ::poll(&pfd, 1, static_cast<int>(remaining));
       if (poll_ret < 0) {
         if (errno == EINTR) {
           continue;
@@ -899,26 +883,12 @@ std::optional<LastUpdatesResult> KnxdClient::cache_last_updates_2(uint32_t start
         return std::nullopt;  // timeout — not a connection error
       }
 
-      // Check if the group socket has data (our own write or external telegram).
-      // We must NOT call poll_group_telegram() here because that would acquire
-      // impl_->mutex while we hold impl_->cache_mutex — wrong lock order.
-      // Instead, return nullopt to signal the read handler that it should drain
-      // group telegrams via its own poll_group_telegram() call at the top of
-      // the poll loop. The read handler will then loop back and re-enter this
-      // function with the remaining time budget.
-      if (nfds >= 2 && (pfds[1].revents & (POLLIN | POLLHUP | POLLERR)) != 0) {
-        // Group socket has data — signal the caller that this is NOT a
-        // connection error and should not trigger a retry.
-        group_socket_data = true;
-        return std::nullopt;
-      }
-
       // Check if the cache connection has data
-      if ((pfds[0].revents & (POLLHUP | POLLERR)) != 0) {
+      if ((pfd.revents & (POLLHUP | POLLERR)) != 0) {
         return std::nullopt;  // connection hangup — retryable
       }
 
-      if ((pfds[0].revents & POLLIN) != 0) {
+      if ((pfd.revents & POLLIN) != 0) {
         // Read data from cache socket
         std::array<uint8_t, 4096> tmp{};
         ssize_t n = ::read(*cache_fd, tmp.data(), tmp.size());
@@ -950,32 +920,15 @@ std::optional<LastUpdatesResult> KnxdClient::cache_last_updates_2(uint32_t start
   };  // end lambda
 
   // First attempt.
-  // group_data tracks whether the attempt returned nullopt because the group
-  // socket has data (our own write arrived as APDU_PACKET).  In that case
-  // we must NOT retry — retrying would send a duplicate CACHE_LAST_UPDATES_2
-  // to knxd on the same cache connection, wasting resources and potentially
-  // overwhelming knxd (especially with 20 workers).  The read handler will
-  // drain the group telegrams and loop back.
-  bool group_data = false;
-  auto result = attempt(group_data);
+  auto result = attempt();
   if (result.has_value()) {
     return result;
-  }
-
-  // Only retry on transient cache connection errors, not on group socket data.
-  // Group socket data means our own write arrived — the read handler above us
-  // will drain group telegrams and retry the entire cache_last_updates_2 call
-  // with the remaining time budget.  Sending a second CACHE_LAST_UPDATES_2 here
-  // would just waste knxd's time and discard the response to the first request
-  // (the buffer is cleared by ensure_cache_connection in the second attempt).
-  if (group_data) {
-    return std::nullopt;
   }
 
   // Retry once for transient cache connection errors.
   // The deadline is shared across attempts so the original time budget is
   // not exceeded.
-  return attempt(group_data);
+  return attempt();
 }
 
 KnxdClient::WaitResult KnxdClient::wait_for_activity(int timeout_ms) {
