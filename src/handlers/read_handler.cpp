@@ -202,8 +202,19 @@ ReadResult ReadHandler::handle(std::string_view query_string) {
     // This returns knxd's AUTHORITATIVE position — we never fabricate i=.
     const auto updates = knxd_.cache_last_updates_2(lastpos, remaining);
     if (!updates.has_value()) {
-      if (written)
+      if (written) {
+        // Data was found (initial read or group drain) but the cache poll
+        // failed. Query knxd's position one more time before returning
+        // so the i= value is authoritative.
+        if (!knxd_.is_connected()) {
+          (void)knxd_.reconnect();
+        }
+        auto pos = knxd_.cache_last_updates_2(lastpos, 0);
+        if (pos.has_value()) {
+          lastpos = pos->new_position;
+        }
         break;
+      }
 
       if (!knxd_.is_connected()) {
         const auto now = std::chrono::steady_clock::now();
@@ -216,7 +227,7 @@ ReadResult ReadHandler::handle(std::string_view query_string) {
         }
       }
       // Transient failure with retries remaining — brief sleep and retry.
-      if (remaining > 1 && timeout_retries < kMaxTimeoutRetries) {
+      if (remaining > 0 && timeout_retries < kMaxTimeoutRetries) {
         timeout_retries++;
         std::this_thread::sleep_for(std::chrono::milliseconds(100));
         continue;
