@@ -143,9 +143,13 @@ ReadResult ReadHandler::handle(std::string_view query_string) {
   // ---- Initial read (if lastpos == 0) ----
   // Reads ALL requested addresses from the knxd cache synchronously.
   // This matches the original: for (i = 0; i < UINT16; i++) { if (subscribed) { ... } }
-  // For addresses NOT found in cache, a GroupValueRead telegram is sent to
-  // query the device's current value. The poll loop below will catch the
-  // responses.
+  // Addresses NOT found in cache are simply omitted from the response —
+  // the poll loop below will catch them when the device sends its value,
+  // or when our own write triggers an APDU_PACKET on the group socket.
+  // We intentionally do NOT send GroupValueRead telegrams for cache misses:
+  // doing so would flood knxd's IP tunnel with read requests when many
+  // workers process initial reads simultaneously, causing knxd's tunnel
+  // retry mechanism to exhaust and fatally disconnect ("Link down, terminating").
   if (lastpos == 0) {
     for (auto addr : eib_addrs) {
       const auto data = knxd_.cache_read(addr, true);  // nowait (cache_read filters out Read APDUs)
@@ -153,9 +157,6 @@ ReadResult ReadHandler::handle(std::string_view query_string) {
         json.add_string(addr_key(addr), hex_encode(data->data(), data->size()));
         already_written.insert(addr);
         written = true;
-      } else {
-        // Cache miss: send GroupValueRead to query the device's current value.
-        (void)knxd_.send_group_packet(addr, build_apdu(ApduType::Read, {}));
       }
     }
   }

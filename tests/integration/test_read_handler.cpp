@@ -65,10 +65,12 @@ TEST_F(ReadHandlerTest, ReadFromKnxdCacheTimeoutZero) {
   EXPECT_TRUE(knxd_.sent_packets().empty());
 }
 
-TEST_F(ReadHandlerTest, TimeoutZeroCacheMissSendsReadTelegram) {
+TEST_F(ReadHandlerTest, TimeoutZeroCacheMissReturnsEmpty) {
   // When t=0 forces an initial read (lastpos=0) and a requested address is not
-  // in the knxd cache, a GroupValueRead telegram must be sent to query the
-  // device's current value. This matches the original eibread-cgi.c behavior.
+  // in the knxd cache, the response is empty (no proactive GroupValueRead).
+  // The poll loop will catch the value when the device sends it.  Proactive
+  // GroupValueRead telegrams were removed to prevent flooding knxd's IP tunnel
+  // when many workers process initial reads simultaneously.
   ReadHandler handler(knxd_, sessions_);
 
   // No cached value for 1/2/3
@@ -82,10 +84,9 @@ TEST_F(ReadHandlerTest, TimeoutZeroCacheMissSendsReadTelegram) {
   EXPECT_NE(result.body.find("\"d\":{}"), std::string::npos);
   EXPECT_NE(result.body.find("\"i\":"), std::string::npos);
 
-  // A GroupValueRead telegram must have been sent for the cache miss
-  ASSERT_EQ(knxd_.sent_packets().size(), 1);
-  EXPECT_EQ(knxd_.sent_packets()[0].group_addr, 0x0A03);  // 1/2/3
-  EXPECT_EQ(knxd_.sent_packets()[0].apdu, build_apdu(ApduType::Read, {}));
+  // No GroupValueRead telegram should be sent — we don't proactively query
+  // devices during the initial read to avoid IP tunnel flooding.
+  EXPECT_TRUE(knxd_.sent_packets().empty());
 }
 
 TEST_F(ReadHandlerTest, TimeoutZeroMixedCacheAndUncached) {
@@ -108,10 +109,9 @@ TEST_F(ReadHandlerTest, TimeoutZeroMixedCacheAndUncached) {
   // Index must be included
   EXPECT_NE(result.body.find("\"i\":"), std::string::npos);
 
-  // Only 1/3/4 (0x0B04) had a cache miss → one read telegram for it
-  ASSERT_EQ(knxd_.sent_packets().size(), 1);
-  EXPECT_EQ(knxd_.sent_packets()[0].group_addr, 0x0B04);  // 1/3/4
-  EXPECT_EQ(knxd_.sent_packets()[0].apdu, build_apdu(ApduType::Read, {}));
+  // No GroupValueRead telegrams should be sent — proactive device queries
+  // were removed to prevent IP tunnel flooding under concurrent load.
+  EXPECT_TRUE(knxd_.sent_packets().empty());
 }
 
 TEST_F(ReadHandlerTest, NegativeTimeoutCacheMiss) {
