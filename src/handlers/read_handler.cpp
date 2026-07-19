@@ -269,6 +269,7 @@ ReadResult ReadHandler::handle(std::string_view query_string) {
 
     // After processing cache updates, drain group telegrams that arrived
     // during the cache poll (belt-and-suspenders for instant write detection).
+    bool found_in_group = false;
     {
       uint16_t telegram_addr = 0;
       std::vector<uint8_t> telegram_apdu;
@@ -281,12 +282,23 @@ ReadResult ReadHandler::handle(std::string_view query_string) {
                             hex_encode(value_data.data(), value_data.size()));
             already_written.insert(telegram_addr);
             written = true;
+            found_in_group = true;
           }
         }
       }
     }
 
     if (written) {
+      // If group telegrams contributed new data, they arrived after
+      // cache_last_updates_2 returned — at positions beyond
+      // updates->new_position.  Query the current position so i=
+      // advances past these events.
+      if (found_in_group) {
+        auto pos = knxd_.cache_last_updates_2(lastpos, 0);
+        if (pos.has_value()) {
+          lastpos = pos->new_position;
+        }
+      }
       break;
     }
   }
