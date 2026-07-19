@@ -1000,4 +1000,161 @@ TEST_F(RealKnxdE2ETest, MultiClientPositionBasedDeltaRetrieval) {
                  (resp.body.find("43") != std::string::npos);
   EXPECT_TRUE(has_any) << "At least one written value must appear in cache, body=" << resp.body;
 }
+
+// ==========================================================================
+// Index monotonicity tests — verify i= never goes backward.
+// These directly test for the stale-cache-response bug where a
+// CACHE_LAST_UPDATES_2 response from a previous (interrupted-by-group-data)
+// call sits in the kernel buffer and is consumed by the next call,
+// causing lastpos to jump backward (e.g. i=140 after requesting i=141).
+// ==========================================================================
+
+/// After a write, a sequence of reads must never return a decreasing i.
+/// Each read's i= value must be >= the previous one.
+TEST_F(RealKnxdE2ETest, IndexNeverGoesBackwardSequentialReads) {
+  Router router(knxd_, sessions_, 5);
+  const std::string addr = a(90);
+
+  // Write to establish a non-zero position
+  auto wr = router.route(req("GET", "/w", "a=" + addr + "&v=8042"));
+  EXPECT_EQ(wr.status_code, 200);
+  std::this_thread::sleep_for(std::chrono::milliseconds(100));
+
+  uint32_t prev_i = 0;
+  // Make 10 sequential reads — verify i is monotonically non-decreasing
+  for (int n = 0; n < 10; ++n) {
+    auto resp = router.route(req("GET", "/r", "a=" + addr + "&t=1&i=" + std::to_string(prev_i)));
+    EXPECT_EQ(resp.status_code, 200);
+    uint32_t i = extract_i(resp.body);
+    EXPECT_GE(i, prev_i) << "i went backward at iteration " << n << ": prev=" << prev_i
+                         << " current=" << i;
+    prev_i = i;
+  }
+}
+
+/// Two concurrent readers sharing a single KnxdClient (via Router) must
+/// never see backward i values.  This simulates the fork-based worker pool
+/// where all workers share one knxd connection (spawn-fcgi mode).
+TEST_F(RealKnxdE2ETest, IndexNeverGoesBackwardConcurrentReaders) {
+  SessionStore sessions_a;
+  SessionStore sessions_b;
+  Router router_a(knxd_, sessions_a, 5);
+  Router router_b(knxd_, sessions_b, 5);
+
+  const std::string addr = a(91);
+
+  // Write to establish baseline
+  auto wr = router_a.route(req("GET", "/w", "a=" + addr + "&v=8042"));
+  EXPECT_EQ(wr.status_code, 200);
+  std::this_thread::sleep_for(std::chrono::milliseconds(100));
+
+  // Get the position after the write
+  auto pos = knxd_.cache_last_updates_2(0, 0);
+  ASSERT_TRUE(pos.has_value());
+  uint32_t start_i = pos->new_position;
+  ASSERT_GT(start_i, 0U);
+
+  // Two concurrent reads with the same start position
+  std::promise<uint32_t> p_a, p_b;
+  auto f_a = p_a.get_future();
+  auto f_b = p_b.get_future();
+
+  std::thread t_a([&]() {
+    auto resp = router_a.route(req("GET", "/r", "a=" + addr + "&t=1&i=" + std::to_string(start_i)));
+    p_a.set_value(extract_i(resp.body));
+  });
+  std::thread t_b([&]() {
+    auto resp = router_b.route(req("GET", "/r", "a=" + addr + "&t=1&i=" + std::to_string(start_i)));
+    p_b.set_value(extract_i(resp.body));
+  });
+
+  uint32_t i_a = f_a.get();
+  uint32_t i_b = f_b.get();
+  t_a.join();
+  t_b.join();
+
+  // Both must be >= start_i (never go backward)
+  EXPECT_GE(i_a, start_i) << "Reader A went backward: start=" << start_i << " got=" << i_a;
+  EXPECT_GE(i_b, start_i) << "Reader B went backward: start=" << start_i << " got=" << i_b;
+}
+
+/// Two completely independent connections (like two fork workers with their
+/// own knxd connections).  A write by Client A must be visible to Client B
+/// with an i value that's >= B's previous i.
+TEST_F(RealKnxdE2ETest, IndexNeverGoesBackwardIndependentConnections) {
+  auto knxd_b = make_second_client();
+  SessionStore sessions_a;
+  SessionStore sessions_b;
+
+  Router router_a(knxd_, sessions_a, 5);
+  Router router_b(knxd_b, sessions_b, 5);
+
+  const std::string addr = a(92);
+
+  // B gets its initial position
+  auto resp_b0 = router_b.route(req("GET", "/r", "a=" + addr + "&t=1"));
+  EXPECT_EQ(resp_b0.status_code, 200);
+  uint32_t i_b0 = extract_i(resp_b0.body);
+
+  // A writes
+  auto wr = router_a.route(req("GET", "/w", "a=" + addr + "&v=8042"));
+  EXPECT_EQ(wr.status_code, 200);
+  std::this_thread::sleep_for(std::chrono::milliseconds(100));
+
+  // B reads again — i must not go backward
+  auto resp_b1 = router_b.route(req("GET", "/r", "a=" + addr + "&t=1&i=" + std::to_string(i_b0)));
+  EXPECT_EQ(resp_b1.status_code, 200);
+  uint32_t i_b1 = extract_i(resp_b1.body);
+  EXPECT_GE(i_b1, i_b0) << "Reader B went backward after A's write: " << "i_b0=" << i_b0
+                        << " i_b1=" << i_b1;
+}
+
+/// Stress test: interleave writes and reads from two connections, verify
+/// i never goes backward on either connection.
+TEST_F(RealKnxdE2ETest, IndexNeverGoesBackwardStressTest) {
+  auto knxd_b = make_second_client();
+  SessionStore sessions_a;
+  SessionStore sessions_b;
+
+  Router router_a(knxd_, sessions_a, 3);
+  Router router_b(knxd_b, sessions_b, 3);
+
+  uint32_t i_a = 0;
+  uint32_t i_b = 0;
+
+  // Get initial positions
+  {
+    auto resp = router_a.route(req("GET", "/r", "a=" + a(93) + "&t=1"));
+    i_a = extract_i(resp.body);
+    auto resp2 = router_b.route(req("GET", "/r", "a=" + a(94) + "&t=1"));
+    i_b = extract_i(resp2.body);
+  }
+
+  constexpr int kRounds = 5;
+  for (int round = 0; round < kRounds; ++round) {
+    // A writes and reads its own address
+    {
+      auto wr =
+          router_a.route(req("GET", "/w", "a=" + a(93) + "&v=80" + std::to_string(0x41 + round)));
+      EXPECT_EQ(wr.status_code, 200);
+      std::this_thread::sleep_for(std::chrono::milliseconds(100));
+      auto resp = router_a.route(req("GET", "/r", "a=" + a(93) + "&t=1&i=" + std::to_string(i_a)));
+      uint32_t new_i = extract_i(resp.body);
+      EXPECT_GE(new_i, i_a) << "A: i went backward at round " << round;
+      i_a = new_i;
+    }
+
+    // B writes and reads its own address
+    {
+      auto wr =
+          router_b.route(req("GET", "/w", "a=" + a(94) + "&v=80" + std::to_string(0x41 + round)));
+      EXPECT_EQ(wr.status_code, 200);
+      std::this_thread::sleep_for(std::chrono::milliseconds(100));
+      auto resp = router_b.route(req("GET", "/r", "a=" + a(94) + "&t=1&i=" + std::to_string(i_b)));
+      uint32_t new_i = extract_i(resp.body);
+      EXPECT_GE(new_i, i_b) << "B: i went backward at round " << round;
+      i_b = new_i;
+    }
+  }
+}
 // NOLINTEND(cert-err58-cpp, misc-use-anonymous-namespace)

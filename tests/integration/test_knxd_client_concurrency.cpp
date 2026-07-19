@@ -65,6 +65,33 @@ public:
     std::vector<uint8_t> apdu;
   };
 
+  /// Inject a stale CACHE_LAST_UPDATES_2 response directly into the cache
+  /// socket's kernel buffer.  Simulates a response from a previous call
+  /// that was never consumed because the combined poll detected group data.
+  void inject_stale_cache_response(uint32_t position) {
+    std::lock_guard<std::mutex> lock(state_mutex_);
+    if (cache_fd_ < 0)
+      return;
+    std::array<uint8_t, 8> resp = {{
+        0x00,
+        0x06,
+        static_cast<uint8_t>((EIB_CACHE_LAST_UPDATES_2 >> 8) & 0xFF),
+        static_cast<uint8_t>(EIB_CACHE_LAST_UPDATES_2 & 0xFF),
+        static_cast<uint8_t>((position >> 24) & 0xFF),
+        static_cast<uint8_t>((position >> 16) & 0xFF),
+        static_cast<uint8_t>((position >> 8) & 0xFF),
+        static_cast<uint8_t>(position & 0xFF),
+    }};
+    write_all(cache_fd_, resp.data(), resp.size());
+  }
+
+  /// Configure the next CACHE_LAST_UPDATES_2 response.
+  void set_cache_last_updates_response(uint32_t position, bool inject_group_data = false) {
+    std::lock_guard<std::mutex> lock(state_mutex_);
+    cache_response_position_ = position;
+    cache_inject_group_data_ = inject_group_data;
+  }
+
   FakeKnxdServer() {
     socket_path_ = make_temp_socket_path();
     if (socket_path_.empty()) {
@@ -193,6 +220,11 @@ private:
       uint16_t msg_type = static_cast<uint16_t>((payload[0] << 8) | payload[1]);
 
       if (msg_type == EIB_OPEN_GROUPCON) {
+        // Track this fd as the group socket connection.
+        {
+          std::lock_guard<std::mutex> lock(state_mutex_);
+          group_fd_ = fd;
+        }
         // Respond with success: same type, empty payload.
         // Wire format: [len:2][type:2].  len=2, payload is the 2-byte type.
         std::array<uint8_t, 4> resp = {0x00, 0x02,  // payload length = 2
@@ -234,13 +266,58 @@ private:
       }
 
       if (msg_type == EIB_CACHE_LAST_UPDATES_2) {
-        // Cache last updates — this is the long-poll query on the cache connection.
-        // For the concurrency test, we intentionally DO NOT respond,
-        // simulating a long-poll that hasn't received updates yet.
-        // The client should time out based on its own deadline.
-        // Just hold the connection open without responding.
-        //
-        // Read more messages until the client closes the connection.
+        // Track this fd as the cache connection.
+        {
+          std::lock_guard<std::mutex> lock(state_mutex_);
+          cache_fd_ = fd;
+        }
+        // Check if a response is configured.
+        uint32_t resp_pos = 0;
+        bool inject = false;
+        int gfd = -1;
+        {
+          std::lock_guard<std::mutex> lock(state_mutex_);
+          resp_pos = cache_response_position_;
+          inject = cache_inject_group_data_;
+          gfd = group_fd_;
+          cache_response_position_ = 0;
+          cache_inject_group_data_ = false;
+        }
+
+        if (resp_pos != 0) {
+          // If configured, inject an APDU_PACKET on the group socket FIRST,
+          // before sending the cache response.  This ensures the combined
+          // poll detects group data and returns nullopt, leaving the cache
+          // response (with the potentially stale position) in the kernel
+          // buffer for the next ensure_cache_connection() drain test.
+          if (inject && gfd >= 0) {
+            std::array<uint8_t, 11> group_msg = {{
+                0x00, 0x09,  // payload length = 9 (type:2 + src:2 + dst:2 + apdu:3)
+                static_cast<uint8_t>((EIB_APDU_PACKET >> 8) & 0xFF),
+                static_cast<uint8_t>(EIB_APDU_PACKET & 0xFF), 0x11, 0x01,  // src pa
+                0x0A, 0x03,       // dst ga = 0x0A03 (1/2/3)
+                0x00, 0x80, 0x42  // APDU = A_GroupValue_Write, value 0x42
+            }};
+            write_all(gfd, group_msg.data(), group_msg.size());
+          }
+
+          // Now send the CACHE_LAST_UPDATES_2 response: [len:2][type:2][end_pos:4]
+          // No changed addresses.
+          std::array<uint8_t, 8> resp = {{
+              0x00,
+              0x06,  // payload length = 6 (type:2 + end_pos:4)
+              static_cast<uint8_t>((EIB_CACHE_LAST_UPDATES_2 >> 8) & 0xFF),
+              static_cast<uint8_t>(EIB_CACHE_LAST_UPDATES_2 & 0xFF),
+              static_cast<uint8_t>((resp_pos >> 24) & 0xFF),
+              static_cast<uint8_t>((resp_pos >> 16) & 0xFF),
+              static_cast<uint8_t>((resp_pos >> 8) & 0xFF),
+              static_cast<uint8_t>(resp_pos & 0xFF),
+          }};
+          write_all(fd, resp.data(), resp.size());
+          continue;
+        }
+
+        // Default: hold the connection open (long-poll simulation)
         while (!shutdown_.load()) {
           std::array<uint8_t, 2> dummy{};
           if (!read_exact(fd, dummy.data(), 2)) {
@@ -282,6 +359,13 @@ private:
   std::thread accept_thread_;
   mutable std::mutex recv_mutex_;
   std::vector<ReceivedGroupPacket> received_packets_;
+
+  // Thread-safe state shared between connection handlers.
+  mutable std::mutex state_mutex_;
+  int group_fd_ = -1;  // fd of the group-socket connection
+  int cache_fd_ = -1;  // fd of the cache connection
+  uint32_t cache_response_position_ = 0;
+  bool cache_inject_group_data_ = false;
 };
 
 }  // namespace
@@ -294,6 +378,11 @@ protected:
     if (!fake_knxd_.is_ready()) {
       GTEST_SKIP() << "Cannot create fake knxd socket";
     }
+
+    // Ignore SIGPIPE so that write() on a closed socket returns EPIPE
+    // instead of killing the process.  Production code does this via
+    // FCGX_Init(), but the test binary doesn't call that.
+    ::signal(SIGPIPE, SIG_IGN);
 
     ASSERT_TRUE(client_.connect(fake_knxd_.path()));
     ASSERT_TRUE(client_.open_group_socket(false));
@@ -449,4 +538,35 @@ TEST_F(KnxdClientConcurrencyTest, RapidWritesAreRateLimited) {
   std::this_thread::sleep_for(std::chrono::milliseconds(50));
   auto packets = fake_knxd_.received_packets();
   EXPECT_EQ(packets.size(), kWrites);
+}
+
+/// Verify that stale CACHE_LAST_UPDATES_2 responses in the kernel buffer
+/// are drained before the cache connection is reused.  This prevents the
+/// lastpos (i=) index from jumping backwards when a response from a previous
+/// (interrupted-by-group-data) call is consumed as the response to a new call.
+TEST_F(KnxdClientConcurrencyTest, StaleCacheResponseDrainedBeforeReuse) {
+  // Establish the cache connection by doing a cache operation.
+  // The fake server tracks cache_fd_ from this.
+  EXPECT_FALSE(client_.cache_read(0x0A03, true).has_value());
+
+  // Inject a stale CACHE_LAST_UPDATES_2 response (position 140) directly
+  // into the cache socket.  This simulates a response that was left in
+  // the kernel buffer because the combined poll was interrupted by group
+  // socket data.
+  fake_knxd_.inject_stale_cache_response(140);
+
+  // Give the kernel time to deliver the data.
+  std::this_thread::sleep_for(std::chrono::milliseconds(10));
+
+  // Now call cache_last_updates_2 with a higher start position.
+  // ensure_cache_connection() reuses the cache connection and MUST drain
+  // the stale position-140 response from the kernel buffer before sending
+  // the new request.  The fake server is configured to respond with
+  // position 141.  Without the drain, the function would consume the
+  // stale response and return position 140 — a backward jump.
+  fake_knxd_.set_cache_last_updates_response(141, false);
+  auto result = client_.cache_last_updates_2(141, 1);
+  ASSERT_TRUE(result.has_value()) << "Expected a fresh response, got nullopt";
+  EXPECT_EQ(result->new_position, 141u)
+      << "Got stale position " << result->new_position << " instead of 141";
 }
