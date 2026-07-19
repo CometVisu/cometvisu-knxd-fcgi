@@ -476,6 +476,21 @@ int* KnxdClient::ensure_cache_connection() {
       // otherwise happen on every cache_read() call, reducing syscall
       // overhead on resource-constrained embedded systems.
       impl_->cache_read_buffer_.clear();
+
+      // Drain any stale data from the kernel receive buffer.
+      // Previous cache_last_updates_2() calls may have left responses
+      // that were never consumed — the combined poll detected group
+      // socket data and the function returned nullopt before reading
+      // the cache response.  Those stale responses sit in the kernel
+      // buffer and would be consumed as the response to our next
+      // request, causing lastpos to jump backwards (e.g. i=140 when
+      // the request started at i=141).
+      // The cache connection is non-blocking, so ::read() returns
+      // EAGAIN once the buffer is empty.
+      std::array<uint8_t, 4096> drain{};
+      while (::read(impl_->cache_fd_, drain.data(), drain.size()) > 0) {
+      }
+
       {
         std::lock_guard<std::recursive_mutex> queue_lock(impl_->telegram_queue_mutex);
         while (!impl_->pre_counted_telegrams_.empty()) {
