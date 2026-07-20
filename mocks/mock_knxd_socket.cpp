@@ -149,9 +149,12 @@ int MockKnxdClient::get_fd() const {
 }
 
 KnxdClient::WaitResult MockKnxdClient::wait_for_activity(int /*timeout_ms*/) {
-  // Mock: return Timeout to let the read handler fall through to cache checks.
-  // Real implementation polls both fds; for tests we rely on pre-configured
-  // cache results via set_last_updates_result() and set_cached_value().
+  // If group telegrams are queued, signal GroupData so the handler drains
+  // them before falling through to cache checks.  This mirrors the real
+  // implementation which polls both group_fd and cache_fd.
+  if (!telegram_queue_.empty()) {
+    return WaitResult::GroupData;
+  }
   return WaitResult::Timeout;
 }
 

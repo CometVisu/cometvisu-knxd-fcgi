@@ -998,3 +998,220 @@ TEST_F(ReadHandlerTest, NoAddressesReturns400) {
   EXPECT_EQ(result.http_status, 400);
   EXPECT_NE(result.body.find("\"error\":\"missing address\""), std::string::npos);
 }
+
+// ============================================================================
+// Tests for combined group+cache poll optimization
+//
+// On a busy KNX bus, cache_last_updates_2 would block on the cache connection
+// while group telegrams (APDU_PACKETs) arrive on the group socket.  Each
+// non-matching telegram triggered a cache round-trip, multiplying latency.
+//
+// The fix: cache_last_updates_2 now polls BOTH the group socket and cache
+// connection.  When the group socket has data, it returns nullopt so the
+// handler drains group telegrams immediately without the cache round-trip.
+// ============================================================================
+
+/// When cache_last_updates_2 returns nullopt because group data is pending,
+/// the handler drains group telegrams in the nullopt handler and returns
+/// the match immediately — without the 100ms retry sleep.
+TEST_F(ReadHandlerTest, GroupTelegramMatchOnCacheNulloptWithoutSleep) {
+  ReadHandler handler(knxd_, sessions_);
+
+  // Simulate: cache_last_updates_2 returns nullopt (group data pending)
+  knxd_.set_cache_last_updates_nullopt_count(1);
+
+  // A matching group telegram is available
+  knxd_.enqueue_telegram(0x0A03, {0x00, 0x80, 0x42});
+
+  // After the nullopt drain finds the match, the handler queries position
+  knxd_.set_last_updates_result(0, {}, 42);
+
+  auto result = handler.handle("a=1/2/3");
+
+  EXPECT_EQ(result.http_status, 200);
+  EXPECT_NE(result.body.find("1/2/3"), std::string::npos);
+  EXPECT_NE(result.body.find("42"), std::string::npos);
+  // i must come from the authoritative position query
+  EXPECT_NE(result.body.find("\"i\":42"), std::string::npos);
+
+  // cache_last_updates_2 should be called exactly twice:
+  // 1. First call → nullopt (group data signal)
+  // 2. Second call → position query with timeout=0
+  // No third call because we don't sleep+retry.
+  EXPECT_EQ(knxd_.cache_last_updates_call_count(), 2)
+      << "Expected 2 calls (nullopt + position query), got "
+      << knxd_.cache_last_updates_call_count();
+}
+
+/// Non-matching group telegrams are drained and discarded in the nullopt
+/// handler, then the handler continues without sleep.  The matching
+/// telegram arrives in the next iteration's Step 1 drain.
+TEST_F(ReadHandlerTest, NonMatchingGroupTelegramsDrainedOnCacheNullopt) {
+  ReadHandler handler(knxd_, sessions_);
+
+  // First cache call returns nullopt (group data pending)
+  knxd_.set_cache_last_updates_nullopt_count(1);
+
+  // Non-matching group telegrams (drained & discarded by nullopt handler)
+  knxd_.enqueue_telegram(0x0B04, {0x00, 0x80, 0x01});  // 1/3/4
+  knxd_.enqueue_telegram(0x0C05, {0x00, 0x80, 0x02});  // 1/4/5
+
+  // Second cache call returns the matching address
+  knxd_.set_last_updates_result(0, {0x0A03}, 5);
+  knxd_.set_cached_value(0x0A03, {0x42});
+
+  auto result = handler.handle("a=1/2/3");
+
+  EXPECT_EQ(result.http_status, 200);
+  EXPECT_NE(result.body.find("1/2/3"), std::string::npos);
+  EXPECT_NE(result.body.find("42"), std::string::npos);
+
+  // Two cache calls: first → nullopt, second → match with position 5.
+  // No extra calls for the non-matching telegrams.
+  EXPECT_EQ(knxd_.cache_last_updates_call_count(), 2)
+      << "Non-matching group telegrams should not trigger extra cache calls";
+}
+
+/// When the group drain in the nullopt handler finds the matching telegram,
+/// the handler queries knxd for position and returns immediately.
+TEST_F(ReadHandlerTest, MatchInNulloptDrainGetsAuthoritativePosition) {
+  ReadHandler handler(knxd_, sessions_);
+
+  // First cache call: nullopt (group data)
+  knxd_.set_cache_last_updates_nullopt_count(1);
+
+  // Matching group telegram (found in nullopt handler drain)
+  knxd_.enqueue_telegram(0x0A03, {0x00, 0x80, 0x42});
+
+  // Position query after match
+  knxd_.set_last_updates_result(0, {}, 99);
+
+  auto result = handler.handle("a=1/2/3&i=0");
+
+  EXPECT_EQ(result.http_status, 200);
+  EXPECT_NE(result.body.find("1/2/3"), std::string::npos);
+  EXPECT_NE(result.body.find("42"), std::string::npos);
+  // i must be 99 (from position query), not 0 (initial value)
+  EXPECT_NE(result.body.find("\"i\":99"), std::string::npos);
+}
+
+// ============================================================================
+// KNX Semantic Correctness Tests
+//
+// KNX Rule 1: Packets must be transmitted exactly once — no duplicates.
+//   A duplicate delivery would double-trigger toggles and scene commands.
+// KNX Rule 2: Packets must be immediately sent without delay.
+//   Group telegrams carry the actual data and must not wait for cache polls.
+// KNX Rule 3: The index (i) must always come from knxd (authoritative).
+//   Never fabricate or locally infer the position — always use cache_last_updates_2.
+//
+// These tests verify the handler meets all three rules, especially in the
+// group-drain-after-cache-nullopt path where data arrives via the group
+// socket but position must be confirmed by the cache connection.
+// ============================================================================
+
+/// Rule 1: When the position query after a group-drain match returns the SAME
+/// position (new_position == lastpos), the handler MUST NOT deliver data.
+/// Returning data with a stale position would cause the client to re-poll
+/// from the old position and receive the same telegram again → double trigger.
+TEST_F(ReadHandlerTest, NoDeliveryWhenPositionDoesNotAdvanceAfterGroupMatch) {
+  ReadHandler handler(knxd_, sessions_);
+
+  // First cache call: nullopt (group data signal)
+  knxd_.set_cache_last_updates_nullopt_count(1);
+
+  // Matching group telegram (found in nullopt handler drain)
+  knxd_.enqueue_telegram(0x0A03, {0x00, 0x80, 0x42});
+
+  // Position query: returns position=0 (same as start=0).
+  // after_position=999 won't match start=0, so the mock returns
+  // new_position=start=0 (unchanged).
+  knxd_.set_last_updates_result(999, {}, 0);
+
+  // Use t=1 to bound the poll loop to 1 second (prevents 300s default).
+  auto result = handler.handle("a=1/2/3&i=0&t=1");
+
+  EXPECT_EQ(result.http_status, 200);
+  // Must NOT deliver data — position hasn't advanced.
+  // If data were delivered with i=0, the client would re-poll from i=0
+  // and get the same telegram again (duplicate trigger!).
+  EXPECT_NE(result.body.find("\"d\":{}"), std::string::npos)
+      << "Data MUST NOT be delivered when position hasn't advanced; " << "got: " << result.body;
+}
+
+/// Rule 1+3: When the position query after a group-drain match FAILS
+/// (returns nullopt), the handler MUST NOT deliver data with a stale position.
+TEST_F(ReadHandlerTest, NoDeliveryWhenPositionQueryFailsAfterGroupMatch) {
+  ReadHandler handler(knxd_, sessions_);
+
+  // First cache call: nullopt (group data)
+  knxd_.set_cache_last_updates_nullopt_count(1);
+
+  // Matching group telegram
+  knxd_.enqueue_telegram(0x0A03, {0x00, 0x80, 0x42});
+
+  // Position query also returns nullopt (second nullopt)
+  knxd_.set_cache_last_updates_nullopt_count(1);
+
+  auto result = handler.handle("a=1/2/3&i=0");
+
+  EXPECT_EQ(result.http_status, 200);
+  // Data must not be delivered — we have no authoritative position.
+  EXPECT_NE(result.body.find("\"d\":{}"), std::string::npos)
+      << "Expected empty d when position query fails; got: " << result.body;
+  // i must be present even when data is empty
+  EXPECT_NE(result.body.find("\"i\":"), std::string::npos);
+}
+
+/// Rule 2+3: When the position query succeeds (new_position > lastpos),
+/// data is delivered immediately with the authoritative position.
+/// This is the happy path that satisfies all three KNX rules.
+TEST_F(ReadHandlerTest, ImmediateDeliveryWithAuthoritativePositionAfterGroupMatch) {
+  ReadHandler handler(knxd_, sessions_);
+
+  // First cache call: nullopt (group data)
+  knxd_.set_cache_last_updates_nullopt_count(1);
+
+  // Matching group telegram
+  knxd_.enqueue_telegram(0x0A03, {0x00, 0x80, 0x42});
+
+  // Position query: succeeds with advanced position (99 > 0)
+  knxd_.set_last_updates_result(0, {}, 99);
+
+  auto result = handler.handle("a=1/2/3&i=0");
+
+  EXPECT_EQ(result.http_status, 200);
+  // Data must be delivered immediately (from group drain)
+  EXPECT_NE(result.body.find("1/2/3"), std::string::npos);
+  EXPECT_NE(result.body.find("42"), std::string::npos);
+  // Position must be authoritative (99 from knxd, not 0)
+  EXPECT_NE(result.body.find("\"i\":99"), std::string::npos);
+  // Must NOT be stale (i=0 would mean we delivered without confirmed position)
+  EXPECT_EQ(result.body.find("\"i\":0"), std::string::npos)
+      << "i must be 99 (authoritative), not 0 (stale)";
+}
+
+/// Rule 1: The same address must not appear twice in the same response.
+/// If data comes from both group drain and cache, it's deduplicated.
+TEST_F(ReadHandlerTest, NoDuplicateAddressInSameResponse) {
+  ReadHandler handler(knxd_, sessions_);
+
+  // Cache has the same value
+  knxd_.set_cached_value(0x0A03, {0x42});
+
+  // Group telegram for the same address arrives
+  knxd_.enqueue_telegram(0x0A03, {0x00, 0x80, 0x42});
+
+  // cache_last_updates_2 also reports the same address
+  knxd_.set_last_updates_result(0, {0x0A03}, 5);
+
+  auto result = handler.handle("a=1/2/3&i=0");
+
+  EXPECT_EQ(result.http_status, 200);
+  // The address should appear exactly once in the response
+  size_t first = result.body.find("1/2/3");
+  EXPECT_NE(first, std::string::npos);
+  size_t second = result.body.find("1/2/3", first + 1);
+  EXPECT_EQ(second, std::string::npos)
+      << "Address 1/2/3 appears more than once in: " << result.body;
+}
