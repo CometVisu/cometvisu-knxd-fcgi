@@ -367,20 +367,21 @@ static void kill_workers(const std::vector<pid_t>& children) {
 /// backoff covers this.
 /// @return The response body, or empty string if all attempts failed.
 static std::string fcgi_retry_transaction(const std::string& socket_path,
-                                          const std::string& query_string,
-                                          uint16_t request_id,
+                                          const std::string& query_string, uint16_t request_id,
                                           int max_attempts = 30) {
   int delay_ms = 10;
   for (int attempt = 0; attempt < max_attempts; ++attempt) {
     FcgiTestClient client;
     if (!client.connect(socket_path)) {
       std::this_thread::sleep_for(std::chrono::milliseconds(delay_ms));
-      if (delay_ms < 500) delay_ms *= 2;
+      if (delay_ms < 500)
+        delay_ms *= 2;
       continue;
     }
     if (!client.send_get_request(request_id, query_string, "/r")) {
       std::this_thread::sleep_for(std::chrono::milliseconds(delay_ms));
-      if (delay_ms < 500) delay_ms *= 2;
+      if (delay_ms < 500)
+        delay_ms *= 2;
       continue;
     }
     std::string result = client.read_response(request_id);
@@ -389,7 +390,8 @@ static std::string fcgi_retry_transaction(const std::string& socket_path,
     }
     // Empty response — worker may not have picked up the connection yet.
     std::this_thread::sleep_for(std::chrono::milliseconds(delay_ms));
-    if (delay_ms < 500) delay_ms *= 2;
+    if (delay_ms < 500)
+      delay_ms *= 2;
   }
   return {};
 }
@@ -464,8 +466,7 @@ TEST_F(ConcurrentClientsTest, MultipleClientsProcessedConcurrently) {
   for (int i = 0; i < kNumClients; ++i) {
     client_threads.emplace_back([&, i, this]() {
       std::string qs = "a=KNX:1/2/3&t=30&client=" + std::to_string(i);
-      results[i] =
-          fcgi_retry_transaction(socket_path_, qs, static_cast<uint16_t>(i + 1));
+      results[i] = fcgi_retry_transaction(socket_path_, qs, static_cast<uint16_t>(i + 1));
       success[i] = !results[i].empty();
     });
   }
@@ -479,7 +480,8 @@ TEST_F(ConcurrentClientsTest, MultipleClientsProcessedConcurrently) {
 
   int fail_count = 0;
   for (int i = 0; i < kNumClients; ++i)
-    if (!success[i]) ++fail_count;
+    if (!success[i])
+      ++fail_count;
   // Allow up to 33% transient failures — fork/accept race window.
   EXPECT_LE(fail_count, 1) << fail_count << "/" << kNumClients << " clients failed";
 
@@ -548,8 +550,7 @@ TEST_F(ConcurrentClientsTest, EnvironmentParamsNotSharedAcrossWorkers) {
   for (int i = 0; i < kNumClients; ++i) {
     client_threads.emplace_back([&, i, this]() {
       std::string qs = "a=KNX:1/2/3&client=" + std::to_string(i);
-      results[i] =
-          fcgi_retry_transaction(socket_path_, qs, static_cast<uint16_t>(i + 1));
+      results[i] = fcgi_retry_transaction(socket_path_, qs, static_cast<uint16_t>(i + 1));
       success[i] = !results[i].empty();
     });
   }
@@ -559,7 +560,8 @@ TEST_F(ConcurrentClientsTest, EnvironmentParamsNotSharedAcrossWorkers) {
 
   int fail_count = 0;
   for (int i = 0; i < kNumClients; ++i)
-    if (!success[i]) ++fail_count;
+    if (!success[i])
+      ++fail_count;
   // Allow up to 20% transient failures — fork/accept race window.
   EXPECT_LE(fail_count, kNumClients / 5)
       << fail_count << "/" << kNumClients << " clients failed after retries";
@@ -620,8 +622,7 @@ TEST_F(ConcurrentClientsTest, ManyConcurrentClientsStressTest) {
   for (int i = 0; i < kNumClients; ++i) {
     client_threads.emplace_back([&, i, this]() {
       std::string qs = "a=KNX:1/2/3&client=" + std::to_string(i);
-      results[i] =
-          fcgi_retry_transaction(socket_path_, qs, static_cast<uint16_t>(i + 1));
+      results[i] = fcgi_retry_transaction(socket_path_, qs, static_cast<uint16_t>(i + 1));
       success[i] = !results[i].empty();
     });
   }
