@@ -13,6 +13,15 @@
 // You should have received a copy of the GNU General Public License
 // along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
+/**
+ * @file hex.h
+ * @brief Hex encoding/decoding utilities for the CometVisu wire protocol.
+ *
+ * CometVisu transmits KNX data values as lowercase hex strings without
+ * spaces or "0x" prefix.  These functions convert between the wire format
+ * and raw byte vectors.
+ */
+
 #pragma once
 
 #include <cstdint>

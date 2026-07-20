@@ -13,6 +13,20 @@
 // You should have received a copy of the GNU General Public License
 // along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
+/**
+ * @file knxd_connector.h
+ * @brief knxd connection helper with exponential backoff retry.
+ *
+ * Provides connect_knxd_with_retry() which is used both at initial startup
+ * and in worker children.  The retry strategy differs:
+ *   - First-time connection: 4 attempts (500ms, 1s, 2s delays).
+ *   - Known-working reconnection: 6 attempts (adds 4s, 8s delays).
+ *
+ * Workers use extended retry because the parent already connected
+ * successfully, so knxd is known to be reachable — longer delays give knxd
+ * more time to recover from a temporary restart.
+ */
+
 #pragma once
 
 #include "knxd_client.h"

@@ -13,6 +13,17 @@
 // You should have received a copy of the GNU General Public License
 // along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
+/**
+ * @file session_store.h
+ * @brief CometVisu session management — creation, validation, expiry.
+ *
+ * Sessions are identified by 16-character hex strings generated from a
+ * Mersenne Twister PRNG (mt19937_64).  Anonymous sessions use the special
+ * id "0" which is always considered valid.
+ *
+ * Thread safety: all public methods are guarded by std::mutex.
+ */
+
 #pragma once
 
 #include <chrono>
@@ -24,10 +35,16 @@
 
 namespace cvknxd {
 
-/// Stores active CometVisu sessions with their metadata.
-/// Sessions expire after a configurable TTL (default: 30 minutes).
-/// Enforces a maximum number of concurrent sessions (default: 10000).
-/// Thread-safe: yes (all public methods are guarded by std::mutex).
+/**
+ * @brief Stores active CometVisu sessions with their metadata.
+ *
+ * Sessions expire after a configurable TTL (default: 30 minutes).
+ * A maximum number of concurrent sessions is enforced (default: 10000);
+ * when the limit is reached, the oldest session is evicted.
+ *
+ * @note Anonymous sessions use the fixed id "0" and are always valid.
+ * @note Thread-safe: all public methods are guarded by std::mutex.
+ */
 class SessionStore {
 public:
   /// Default session TTL in seconds.

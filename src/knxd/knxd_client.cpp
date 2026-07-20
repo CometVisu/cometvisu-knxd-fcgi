@@ -13,6 +13,27 @@
 // You should have received a copy of the GNU General Public License
 // along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
+/**
+ * @file knxd_client.cpp
+ * @brief Real implementation of KnxdClientInterface using POSIX Unix sockets.
+ *
+ * Manages two connections to knxd:
+ *   - The **main connection** (fd): a group socket for sending group packets
+ *     and receiving APDU_PACKET telegrams.
+ *   - The **cache connection** (cache_fd_): a plain socket for cache_read()
+ *     and cache_last_updates_2() operations, avoiding head-of-line blocking.
+ *
+ * The reference eibread-cgi / eibwrite-cgi used a single connection per
+ * request.  We use persistent connections with automatic reconnect on
+ * failure, which reduces syscall overhead and connection slot consumption
+ * under load.
+ *
+ * Thread safety: three recursive_mutex instances serialize access to the
+ * main connection (mutex), cache connection (cache_mutex), and pre-counted
+ * telegram queue (telegram_queue_mutex).  Lock ordering is always:
+ * mutex → cache_mutex → telegram_queue_mutex.
+ */
+
 #include "knxd_client.h"
 
 #include <fcntl.h>
@@ -239,8 +260,16 @@ bool KnxdClient::reconnect() {
 
 namespace {
 
-/// Write all bytes to socket. Handles EAGAIN in non-blocking mode by polling.
-/// Returns true if all bytes were written.
+/// @brief Write all bytes to a socket, handling EAGAIN in non-blocking mode.
+///
+/// In non-blocking mode, ::write() may return EAGAIN when the kernel send
+/// buffer is full.  This function polls for writability and retries, with a
+/// 5-second timeout to avoid hanging indefinitely.
+///
+/// @param fd Socket file descriptor.
+/// @param data Pointer to the data to write.
+/// @param len Number of bytes to write.
+/// @return true if all bytes were written successfully.
 bool write_all(int fd, const uint8_t* data, size_t len) {
   size_t offset = 0;
   while (offset < len) {
@@ -268,9 +297,12 @@ bool write_all(int fd, const uint8_t* data, size_t len) {
   return true;
 }
 
-/// Shrink a vector if it has significant excess capacity (more than 4x the used
-/// size or more than 64 KB of waste).  Prevents unbounded memory retention on
-/// long-running embedded systems after transient traffic spikes.
+/// @brief Shrink a vector if it has significant excess capacity.
+///
+/// Triggered when capacity exceeds 4× the used size OR the waste exceeds
+/// 64 KB.  Prevents unbounded memory retention on long-running embedded
+/// systems after transient traffic spikes — for example, a burst of 100
+/// telegrams could leave a 400 KB buffer allocated indefinitely.
 inline void shrink_if_large(std::vector<uint8_t>& buf) {
   // NOLINTNEXTLINE(bugprone-implicit-widening-of-multiplication-result)
   if (buf.capacity() > static_cast<size_t>(buf.size()) * 4 ||
@@ -279,14 +311,22 @@ inline void shrink_if_large(std::vector<uint8_t>& buf) {
   }
 }
 
-/// Read a complete eibd message (length-prefixed) from the socket.
-/// Uses an internal buffer to handle partial reads in non-blocking mode.
-/// This is an iterative (non-recursive) implementation to avoid stack overflow
-/// on busy KNX buses with many partial reads.
+/// @brief Read a complete eibd message (length-prefixed) from a socket.
+///
+/// Uses an internal accumulation buffer to handle partial reads in
+/// non-blocking mode.  The eibd protocol prefixes each message with a
+/// 2-byte big-endian length, so we know exactly how many bytes to expect.
+///
+/// This is an iterative (non-recursive) implementation to avoid stack
+/// overflow on busy KNX buses where many partial reads could recurse
+/// deeply.
+///
 /// @param fd Socket file descriptor.
 /// @param buffer Accumulated read buffer (consumed as messages are parsed).
-///              Enforced maximum size of kMaxReadBufferSize to prevent memory leaks.
-/// @return Complete message bytes (including 2-byte length header), or std::nullopt.
+///              Enforced maximum size of kMaxReadBufferSize to prevent
+///              memory leaks from unconsumed telegrams.
+/// @return Complete message bytes including the 2-byte length header, or
+///         std::nullopt if no complete message is available yet.
 std::optional<std::vector<uint8_t>> read_message(int fd, std::vector<uint8_t>& buffer) {
   while (true) {
     // Try to extract a complete message from the buffer (pure function, no I/O)

@@ -13,6 +13,11 @@
 // You should have received a copy of the GNU General Public License
 // along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
+/**
+ * @file query_string.cpp
+ * @brief Implementation of the query string parser.
+ */
+
 #include "query_string.h"
 
 #include <algorithm>

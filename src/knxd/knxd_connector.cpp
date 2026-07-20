@@ -13,6 +13,11 @@
 // You should have received a copy of the GNU General Public License
 // along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
+/**
+ * @file knxd_connector.cpp
+ * @brief Implementation of the exponential backoff knxd connector.
+ */
+
 #include "knxd_connector.h"
 
 #include <unistd.h>

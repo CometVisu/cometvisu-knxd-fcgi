@@ -13,6 +13,20 @@
 // You should have received a copy of the GNU General Public License
 // along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
+/**
+ * @file router.h
+ * @brief URL router — dispatches FastCGI requests to the appropriate handler.
+ *
+ * Maps CometVisu protocol endpoints to their handlers:
+ *   - `/l` → LoginHandler (session creation)
+ *   - `/r` → ReadHandler (cache read + COMET long-poll)
+ *   - `/w` → WriteHandler (group telegram write)
+ *
+ * The router itself has minimal logic — it simply extracts the path from the
+ * request and delegates to the correct handler.  Unknown endpoints receive a
+ * 404 response.
+ */
+
 #pragma once
 
 #include "fcgi/fcgi_request.h"
@@ -23,13 +37,20 @@
 
 namespace cvknxd {
 
-/// URL router: dispatches FCGI requests to the appropriate handler.
+/**
+ * @brief URL router: dispatches FCGI requests to the appropriate handler.
+ *
+ * Constructed with references to the knxd client and session store, which
+ * are forwarded to the individual handlers.
+ */
 class Router {
 public:
   Router(KnxdClientInterface& knxd, SessionStore& sessions, int longpoll_timeout_sec = 300,
          std::string base_url = "");
 
-  /// Dispatch a request and return the response.
+  /// @brief Dispatch a request and return the response.
+  /// @param request The parsed FCGI request.
+  /// @return FcgiResponse with status code, content type, and body.
   [[nodiscard]] FcgiResponse route(const FcgiRequest& request);
 
 private:

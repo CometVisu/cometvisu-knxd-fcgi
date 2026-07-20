@@ -13,6 +13,21 @@
 // You should have received a copy of the GNU General Public License
 // along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
+/**
+ * @file knxd_protocol.h
+ * @brief eibd client protocol — data types, message builders, and parsers.
+ *
+ * Implements the wire protocol that knxd speaks over its Unix socket.
+ * All protocol constants (EIB_OPEN_GROUPCON, EIB_CACHE_READ, etc.) are
+ * sourced from knxd's own <eibtypes.h> header at compile time — nothing
+ * is hardcoded.  This ensures compatibility with the installed knxd version.
+ *
+ * The protocol is the same one used by the reference eibread-cgi / eibwrite-cgi
+ * (which were written against earlier eibd versions).  The wire format has
+ * not changed: 2-byte big-endian length prefix followed by a type-tagged
+ * payload.
+ */
+
 #ifndef COMETVISU_KNXD_FCGI_KNXD_PROTOCOL_H_
 #define COMETVISU_KNXD_FCGI_KNXD_PROTOCOL_H_
 
@@ -26,7 +41,12 @@
 
 namespace cvknxd {
 
-/// KNX group address: three-level X/Y/Z representation and 16-bit internal form.
+/**
+ * @brief KNX group address in three-level X/Y/Z representation.
+ *
+ * Internally stored as three uint8_t components (main/middle/sub) with a
+ * 16-bit EIB address encoding: `(main << 11) | (middle << 8) | sub`.
+ */
 struct KnxGroupAddress {
   uint8_t main = 0;    // X in X/Y/Z
   uint8_t middle = 0;  // Y in X/Y/Z
@@ -49,13 +69,16 @@ struct KnxGroupAddress {
   bool operator!=(const KnxGroupAddress& other) const { return !(*this == other); }
 };
 
-/// KNX address namespace prefix and group address.
-/// CometVisu format: "NAMESPACE:ADDRESS", e.g. "KNX:1/2/3".
-///
-/// When no namespace prefix is present in the input (no colon), the configured
-/// default namespace is used. The default namespace is empty by default,
-/// meaning addresses are just "X/Y/Z" with no prefix. Set via
-/// set_default_namespace() or the ADDRESS_PREFIX environment variable.
+/**
+ * @brief Full KNX address with optional namespace prefix.
+ *
+ * CometVisu format: `NAMESPACE:X/Y/Z`, e.g. `"KNX:1/2/3"`.
+ *
+ * When no namespace prefix is present in the input (no colon), the configured
+ * default namespace is used (set via set_default_namespace() or the
+ * ADDRESS_PREFIX environment variable).  The default namespace is empty by
+ * default, meaning addresses are just "X/Y/Z" with no prefix.
+ */
 struct KnxAddress {
   std::string ns;         // namespace, e.g. "KNX"
   KnxGroupAddress group;  // group address part
@@ -83,7 +106,13 @@ private:
   static std::string default_namespace_;
 };
 
-/// APDU types for group communication.
+/**
+ * @brief APDU types for group communication (Application Layer).
+ *
+ * The APCI (Application Protocol Control Information) is encoded in bits 7-6
+ * of the second APDU byte.  The remaining 6 bits carry the value for 1-byte
+ * data points.
+ */
 enum class ApduType : uint8_t {
   Read = 0x00,      // A_GroupValue_Read
   Response = 0x40,  // A_GroupValue_Response
@@ -104,9 +133,13 @@ enum class ApduType : uint8_t {
 [[nodiscard]] bool parse_apdu(const std::vector<uint8_t>& apdu, ApduType& out_type,
                               std::vector<uint8_t>& out_data);
 
-/// EIB message type constants — from knxd's eibtypes.h.
-/// Use the knxd-defined constants directly (EIB_OPEN_GROUPCON etc.) rather
-/// than hard-coding them.
+/**
+ * @brief EIB message type constants sourced from knxd's <eibtypes.h>.
+ *
+ * These are wrappers around the C preprocessor constants defined by knxd.
+ * Using the knxd-defined values rather than hardcoding ensures we're always
+ * in sync with the installed knxd version.
+ */
 namespace EibMessageType {
 inline constexpr uint16_t OPEN_GROUPCON = EIB_OPEN_GROUPCON;
 inline constexpr uint16_t GROUP_PACKET = EIB_GROUP_PACKET;

@@ -13,6 +13,20 @@
 // You should have received a copy of the GNU General Public License
 // along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
+/**
+ * @file knxd_protocol.cpp
+ * @brief Implementation of the eibd wire protocol — address parsing, APDU
+ *        building/parsing, and eibd message construction.
+ *
+ * All wire-format encodings (big-endian lengths, type-tagged payloads)
+ * follow the eibd specification as implemented by knxd.
+ *
+ * @note Single-byte values exceeding 6 bits (0x3F) are auto-promoted to
+ *       multi-byte format in build_apdu().  The reference eibread-cgi
+ *       silently truncated such values to 6 bits; we preserve the full
+ *       value to support 1-byte DPTs with values > 63 (e.g. DPT 5.010).
+ */
+
 #include "knxd_protocol.h"
 
 #include <charconv>
@@ -299,10 +313,9 @@ std::optional<LastUpdatesResult> parse_cache_last_updates_2_response(
   }
 
   LastUpdatesResult result;
-  result.new_position = (static_cast<uint32_t>(data.at(0)) << 24) |
-                        (static_cast<uint32_t>(data.at(1)) << 16) |
-                        (static_cast<uint32_t>(data.at(2)) << 8) |
-                        static_cast<uint32_t>(data.at(3));
+  result.new_position =
+      (static_cast<uint32_t>(data.at(0)) << 24) | (static_cast<uint32_t>(data.at(1)) << 16) |
+      (static_cast<uint32_t>(data.at(2)) << 8) | static_cast<uint32_t>(data.at(3));
 
   // Remaining bytes are pairs of group addresses
   const size_t remaining = data.size() - 4;

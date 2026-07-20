@@ -13,6 +13,19 @@
 // You should have received a copy of the GNU General Public License
 // along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
+/**
+ * @file debug_log.h
+ * @brief Debug logging facility for tracing HTTP and knxd communication.
+ *
+ * Controlled via the `DEBUG_BACKEND` environment variable (set to "1",
+ * "true", "yes", or "on").  Output goes to stderr with millisecond-precision
+ * timestamps.  Long URIs and large response bodies are truncated for
+ * readability.
+ *
+ * When disabled, all methods are no-ops with minimal overhead (a single
+ * boolean check).  This is the common case in production.
+ */
+
 #pragma once
 
 #include <cstddef>
@@ -22,14 +35,14 @@
 
 namespace cvknxd {
 
-/// Debug logging facility for tracing HTTP ↔ app and app ↔ knxd communication.
-///
-/// Controlled via the `DEBUG_BACKEND` environment variable (set to "1" or "true").
-/// Output goes to stderr with timestamps. Long URIs and large response bodies
-/// are truncated for readability, with total size noted.
-///
-/// Methods are static for easy access from any component without injection.
-/// All methods are no-ops when disabled, with minimal overhead (a single bool check).
+/**
+ * @brief Debug logging facility.
+ *
+ * All methods are static for easy access from any component without
+ * dependency injection.  Each log call builds the complete line in an
+ * ostringstream and writes it in a single `std::cerr <<` call to minimize
+ * interleaving when multiple processes share stderr.
+ */
 class DebugLog {
 public:
   /// Initialize from environment variable `DEBUG_BACKEND`.

@@ -13,6 +13,21 @@
 // You should have received a copy of the GNU General Public License
 // along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
+/**
+ * @file fcgi_server.cpp
+ * @brief FastCGI server implementation — accept loop, request parsing, response writing.
+ *
+ * The two-mode architecture (spawn-fcgi vs. direct socket) exists because the
+ * reference eibread-cgi / eibwrite-cgi backends used spawn-fcgi exclusively.
+ * We support that mode for compatibility and direct-socket mode for standalone
+ * operation with a fork-based worker pool.
+ *
+ * In direct socket mode the key difference from the reference implementation
+ * is that we use FCGX_Accept_r() on our own socket fd instead of FCGI_Accept()
+ * on stdin.  The FCGX API is lower-level but gives us control over the listen
+ * socket — essential for sharing it across forked children.
+ */
+
 #include "fcgi_server.h"
 
 #include <fcgi_stdio.h>
@@ -93,6 +108,11 @@ int FcgiServer::run() {
     // ---- Direct socket mode ----
     // Accept FastCGI connections on our own Unix/TCP socket.
     // This is used when running standalone (e.g. via FCGI_SOCKET env var).
+    //
+    // The reference eibread-cgi / eibwrite-cgi backends used only the
+    // spawn-fcgi path below.  Direct socket mode is an extension that
+    // enables the fork-based worker pool — each child inherits listen_fd_
+    // and calls FCGX_Accept_r() independently; the kernel serializes.
 
     // FCGX_Init() must be called before FCGX_Accept_r() — it sets the
     // libInitialized flag and performs platform-specific setup (OS_LibInit).
@@ -109,8 +129,9 @@ int FcgiServer::run() {
 
     while (FCGX_Accept_r(&request_) >= 0) {
       // Read request parameters directly from the FCGI envp array.
-      // This avoids setting the global environ pointer, making it safe
-      // for use in both single-threaded and multithreaded contexts.
+      // The reference eibread-cgi used getenv() which reads from the
+      // global `environ` pointer.  We pass envp directly instead, which
+      // is thread-safe and avoids the need to set `environ = request_.envp`.
       const FcgiRequest req = read_request(request_.envp);
 
       // ---- General concurrency limiting ----
@@ -182,7 +203,9 @@ int FcgiServer::run() {
   } else {
     // ---- Spawn-fcgi mode ----
     // Accept FastCGI connections from stdin/stdout as set up by spawn-fcgi
-    // or the web server.
+    // or the web server.  This is the mode used by the reference
+    // eibread-cgi / eibwrite-cgi backends — it uses the simpler FCGI_stdio
+    // API where the web server multiplexes requests onto our stdin.
     while (FCGI_Accept() >= 0) {
       const FcgiRequest req = read_request();
 
@@ -203,14 +226,23 @@ void FcgiServer::shutdown() {
   shutdown_requested_.store(true, std::memory_order_relaxed);
 
   if (listen_fd_ >= 0) {
+    // Three-step shutdown to reliably unblock workers stuck in accept():
+    //
     // Step 1: shutdown(SHUT_RDWR) causes any worker blocked in accept()
-    // on this fd to fail with EINVAL. This is reliable on Linux, unlike
-    // close() which may leave accept() blocked indefinitely.
+    // on this fd to fail with EINVAL.  This is reliable on Linux, unlike
+    // close() which may leave accept() blocked indefinitely because the
+    // kernel keeps the fd alive while children hold references.
     ::shutdown(listen_fd_, SHUT_RDWR);
 
-    // Step 2: Connect to unblock any workers that didn't respond to
-    // shutdown(). Each accepted connection gets an immediate client EOF,
-    // causing FCGX_Accept_r to return -1 and the worker to exit.
+    // Step 2: Self-connect to unblock any workers that didn't respond to
+    // shutdown().  Each accepted connection gets an immediate EOF (we
+    // close our end right away), causing FCGX_Accept_r() to return -1
+    // and the worker to exit its loop naturally.
+    //
+    // Connecting 64 times is a belt-and-suspenders approach — it covers
+    // the pathological case where multiple workers were stuck in accept()
+    // simultaneously and the kernel delivered the shutdown signal to only
+    // one of them.
     struct sockaddr_un addr {};
     socklen_t addr_len = sizeof(addr);
     // NOLINTNEXTLINE(cppcoreguidelines-pro-type-reinterpret-cast)
@@ -233,7 +265,7 @@ void FcgiServer::shutdown() {
       }
     }
 
-    // Step 3: Close the fd. By now all workers should have exited.
+    // Step 3: Close the fd.  By now all workers should have exited.
     ::close(listen_fd_);
     listen_fd_ = -1;
   }

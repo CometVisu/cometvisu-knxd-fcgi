@@ -13,6 +13,11 @@
 // You should have received a copy of the GNU General Public License
 // along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
+/**
+ * @file version.cpp
+ * @brief Implementation of version information accessors.
+ */
+
 #include "version.h"
 
 namespace cvknxd {

@@ -13,6 +13,26 @@
 // You should have received a copy of the GNU General Public License
 // along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
+/**
+ * @file main.cpp
+ * @brief Application entry point — configuration, signal handling, worker
+ *        pool, and the main event loop.
+ *
+ * This is the equivalent of running eibread-cgi and eibwrite-cgi as a
+ * single unified binary, with these key differences:
+ *   - Fork-based worker pool instead of spawn-fcgi's multi-instance model
+ *   - Persistent knxd connections instead of per-request connect/disconnect
+ *   - Direct socket mode (FCGI_SOCKET) for standalone operation
+ *   - Load shedding semaphores to prevent long-poll head-of-line blocking
+ *   - Signal handling for graceful shutdown (SIGTERM, SIGCHLD)
+ *   - Resource limits (RLIMIT_NOFILE, RLIMIT_AS) for embedded safety
+ *
+ * Startup order matters: the FCGI listen socket is opened BEFORE the knxd
+ * connection, so the web server can connect even while we're retrying knxd.
+ *
+ * @see AGENTS.md for the full design rationale.
+ */
+
 #include <semaphore.h>
 #include <sys/mman.h>
 #include <sys/prctl.h>

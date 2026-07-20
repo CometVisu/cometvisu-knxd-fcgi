@@ -13,6 +13,11 @@
 // You should have received a copy of the GNU General Public License
 // along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
+/**
+ * @file fcgi_request.cpp
+ * @brief Implementation of FcgiRequest::path() — path extraction from CGI variables.
+ */
+
 #include "fcgi_request.h"
 
 namespace cvknxd {
