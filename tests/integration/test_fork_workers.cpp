@@ -21,13 +21,12 @@
 #include <sys/wait.h>
 #include <unistd.h>
 
-#include <atomic>
+#include <array>
 #include <cerrno>
 #include <csignal>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
-#include <functional>
 #include <string>
 #include <vector>
 
@@ -42,7 +41,7 @@ namespace {
 /// Returns empty string on failure.
 std::string make_unique_socket_path() {
   const char* tmpdir = getenv("TMPDIR");
-  if (tmpdir == nullptr || tmpdir[0] == '\0') {
+  if (tmpdir == nullptr || *tmpdir == '\0') {
     tmpdir = "/tmp";
   }
   std::string tmpl = std::string(tmpdir) + "/fcgi-fork-integration-XXXXXX";
@@ -79,6 +78,7 @@ bool sockets_available() {
   addr.sun_family = AF_UNIX;
   size_t path_len = path.copy(addr.sun_path, sizeof(addr.sun_path) - 1);
   addr.sun_path[path_len] = '\0';
+  // NOLINTNEXTLINE(cppcoreguidelines-pro-type-reinterpret-cast)
   int rc = bind(s, reinterpret_cast<struct sockaddr*>(&addr), sizeof(addr));
   close(s);
   unlink(path.c_str());
@@ -90,17 +90,20 @@ bool sockets_available() {
 int connect_with_retry(const std::string& path, int max_retries, int delay_ms) {
   for (int i = 0; i < max_retries; ++i) {
     int fd = socket(AF_UNIX, SOCK_STREAM, 0);
-    if (fd < 0)
+    if (fd < 0) {
       return -1;
+    }
 
     struct sockaddr_un addr {};
     addr.sun_family = AF_UNIX;
     size_t path_len = path.copy(addr.sun_path, sizeof(addr.sun_path) - 1);
     addr.sun_path[path_len] = '\0';
 
+    // NOLINTNEXTLINE(cppcoreguidelines-pro-type-reinterpret-cast)
     int rc = connect(fd, reinterpret_cast<struct sockaddr*>(&addr), sizeof(addr));
-    if (rc == 0)
+    if (rc == 0) {
       return fd;
+    }
 
     close(fd);
     usleep(static_cast<useconds_t>(delay_ms) * 1000);
@@ -125,9 +128,9 @@ std::vector<pid_t> fork_workers(int num_workers, FcgiServer& server, const char*
         ::kill(child, SIGTERM);
       }
       // Wait for killed children
-      int status;
       for (size_t j = 0; j < children.size(); ++j) {
-        ::wait(&status);
+        int ws = 0;
+        ::wait(&ws);
       }
       children.clear();
       break;
@@ -165,7 +168,7 @@ std::vector<pid_t> fork_workers(int num_workers, FcgiServer& server, const char*
 // with glibc >= 2.34).
 //
 class ForkWorkerTest : public ::testing::Test {
-protected:
+public:
   void SetUp() override {
     if (!sockets_available()) {
       GTEST_SKIP() << "Unix socket creation is blocked by sandbox";
@@ -182,7 +185,7 @@ protected:
   /// FCGX_Accept_r() internally retries on EINTR.  The only reliable way
   /// to terminate children blocked in the accept loop is SIGKILL, which
   /// cannot be caught, blocked, or ignored by the process.
-  void cleanup_children(const std::vector<pid_t>& children, FcgiServer& server) {
+  static void cleanup_children(const std::vector<pid_t>& children, FcgiServer& server) {
     // Close the listen socket in the parent (children keep their own copies).
     server.close_listen_socket();
 
@@ -193,9 +196,9 @@ protected:
 
     // Reap zombies.  SIGKILL is synchronous — the child is dead by the time
     // kill() returns, so waitpid should not block.
-    int status;
     for (size_t i = 0; i < children.size(); ++i) {
-      ::wait(&status);
+      int ws = 0;
+      ::wait(&ws);
     }
   }
 
@@ -250,7 +253,7 @@ TEST_F(ForkWorkerTest, ForkedWorkersAcceptConnections) {
                      << kConnections;
 
     // Send a minimal valid FCGI request: BEGIN_REQUEST + empty PARAMS
-    constexpr unsigned char kBeginRequest[] = {
+    static constexpr std::array<unsigned char, 16> kBeginRequest = {
         // FCGI header — BEGIN_REQUEST
         1,     // version = FCGI_VERSION_1
         1,     // type = FCGI_BEGIN_REQUEST
@@ -263,7 +266,7 @@ TEST_F(ForkWorkerTest, ForkedWorkersAcceptConnections) {
         0,             // flags
         0, 0, 0, 0, 0  // reserved[5]
     };
-    constexpr unsigned char kEmptyParams[] = {
+    static constexpr std::array<unsigned char, 8> kEmptyParams = {
         // FCGI header — PARAMS (empty = end of params)
         1,     // version = FCGI_VERSION_1
         4,     // type = FCGI_PARAMS
@@ -272,7 +275,7 @@ TEST_F(ForkWorkerTest, ForkedWorkersAcceptConnections) {
         0,     // paddingLength
         0      // reserved
     };
-    constexpr unsigned char kEmptyStdin[] = {
+    static constexpr std::array<unsigned char, 8> kEmptyStdin = {
         // FCGI header — STDIN (empty = end of stdin)
         1,     // version = FCGI_VERSION_1
         5,     // type = FCGI_STDIN
@@ -281,11 +284,11 @@ TEST_F(ForkWorkerTest, ForkedWorkersAcceptConnections) {
         0,     // paddingLength
         0      // reserved
     };
-    ssize_t begin_written = ::write(fd, kBeginRequest, sizeof(kBeginRequest));
+    ssize_t begin_written = ::write(fd, kBeginRequest.data(), kBeginRequest.size());
     (void)begin_written;
-    ssize_t params_written = ::write(fd, kEmptyParams, sizeof(kEmptyParams));
+    ssize_t params_written = ::write(fd, kEmptyParams.data(), kEmptyParams.size());
     (void)params_written;
-    ssize_t stdin_written = ::write(fd, kEmptyStdin, sizeof(kEmptyStdin));
+    ssize_t stdin_written = ::write(fd, kEmptyStdin.data(), kEmptyStdin.size());
     (void)stdin_written;
 
     ::shutdown(fd, SHUT_RDWR);
@@ -328,7 +331,7 @@ TEST_F(ForkWorkerTest, ForkFailureIsReported) {
   // We set the soft limit to 50 processes, which is low enough that
   // fork_workers(100) will always fail, while still allowing the test
   // process itself plus a few children to exist.
-  struct rlimit old_limit;
+  struct rlimit old_limit = {};
   ASSERT_EQ(::getrlimit(RLIMIT_NPROC, &old_limit), 0)
       << "getrlimit(RLIMIT_NPROC) failed: " << ::strerror(errno);
 
@@ -378,7 +381,7 @@ TEST_F(ForkWorkerTest, ChildExitsOnSigterm) {
   ASSERT_TRUE(server.listen(socket_path_));
 
   auto children = fork_workers(1, server, nullptr);
-  ASSERT_EQ(children.size(), 1u) << "Failed to fork single worker";
+  ASSERT_EQ(children.size(), 1U) << "Failed to fork single worker";
 
   pid_t child_pid = children[0];
 
@@ -394,7 +397,7 @@ TEST_F(ForkWorkerTest, ChildExitsOnSigterm) {
   usleep(100000);
 
   // Child should have exited by now
-  int status;
+  int status = 0;
   pid_t waited = ::waitpid(child_pid, &status, WNOHANG);
   if (waited == 0) {
     // Still running — force kill

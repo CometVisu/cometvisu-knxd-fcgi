@@ -25,8 +25,9 @@ namespace cvknxd {
 std::string_view FcgiRequest::path() const {
   // PATH_INFO is the primary source for the endpoint path.
   // e.g. SCRIPT_NAME=/cgi-bin/visu, PATH_INFO=/l
-  if (!path_info.empty())
+  if (!path_info.empty()) {
     return std::string_view{path_info};
+  }
 
   // Fall back to request_uri minus query string
   std::string_view uri_path;
@@ -43,8 +44,9 @@ std::string_view FcgiRequest::path() const {
   if (!script_name.empty() && uri_path.size() >= script_name.size() &&
       uri_path.compare(0, script_name.size(), script_name) == 0) {
     std::string_view trail = uri_path.substr(script_name.size());
-    if (!trail.empty())
+    if (!trail.empty()) {
       return trail;
+    }
     // SCRIPT_NAME consumes the entire URI path (e.g. SCRIPT_NAME=/cgi-bin/l,
     // uri_path=/cgi-bin/l).  Use the last path component of SCRIPT_NAME
     // itself as the endpoint identifier.

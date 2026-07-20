@@ -29,9 +29,7 @@
 
 #include "knxd_protocol.h"
 
-#include <charconv>
 #include <cstring>
-#include <stdexcept>
 
 namespace cvknxd {
 

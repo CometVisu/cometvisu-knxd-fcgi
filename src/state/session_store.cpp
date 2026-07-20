@@ -22,6 +22,7 @@
 
 #include <unistd.h>
 
+#include <array>
 #include <chrono>
 #include <random>
 
@@ -31,8 +32,9 @@ SessionStore::SessionStore(int session_ttl_sec, size_t max_sessions)
     : session_ttl_sec_(session_ttl_sec), max_sessions_(max_sessions) {}
 
 std::string SessionStore::create_session(bool anonymous) {
-  if (anonymous)
+  if (anonymous) {
     return "0";
+  }
 
   std::lock_guard<std::mutex> lock(mutex_);
 
@@ -56,15 +58,17 @@ std::string SessionStore::create_session(bool anonymous) {
 }
 
 bool SessionStore::is_valid(std::string_view session_id) {
-  if (session_id == "0")
+  if (session_id == "0") {
     return true;  // anonymous always valid
+  }
 
   std::lock_guard<std::mutex> lock(mutex_);
 
   std::string key{session_id};
   const auto it = sessions_.find(key);
-  if (it == sessions_.end())
+  if (it == sessions_.end()) {
     return false;
+  }
 
   // Check expiration
   const auto age = std::chrono::duration_cast<std::chrono::seconds>(
@@ -79,8 +83,9 @@ bool SessionStore::is_valid(std::string_view session_id) {
 }
 
 void SessionStore::remove(std::string_view session_id) {
-  if (session_id == "0")
+  if (session_id == "0") {
     return;
+  }
   std::lock_guard<std::mutex> lock(mutex_);
   std::string key{session_id};
   sessions_.erase(key);
@@ -116,7 +121,8 @@ std::string SessionStore::generate_id() {
   const uint64_t num = dist(gen);
   std::string id;
   id.reserve(16);
-  static constexpr char kHex[] = "0123456789abcdef";
+  static constexpr std::array<char, 16> kHex = {'0', '1', '2', '3', '4', '5', '6', '7',
+                                                '8', '9', 'a', 'b', 'c', 'd', 'e', 'f'};
   for (int i = 0; i < 16; ++i) {
     id.push_back(kHex[(num >> (60 - i * 4)) & 0xF]);
   }

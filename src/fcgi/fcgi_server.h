@@ -35,7 +35,6 @@
 #include <atomic>
 #include <functional>
 #include <string>
-#include <vector>
 
 #include "fcgi_request.h"
 

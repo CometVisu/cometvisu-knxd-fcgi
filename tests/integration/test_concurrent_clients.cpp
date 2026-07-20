@@ -24,6 +24,7 @@
 #include <sys/wait.h>
 #include <unistd.h>
 
+#include <array>
 #include <atomic>
 #include <cerrno>
 #include <chrono>
@@ -31,7 +32,6 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
-#include <functional>
 #include <string>
 #include <thread>
 #include <vector>
@@ -45,7 +45,7 @@ namespace {
 /// Generate a unique socket path in the writable temp directory.
 std::string make_unique_socket_path() {
   const char* tmpdir = getenv("TMPDIR");
-  if (tmpdir == nullptr || tmpdir[0] == '\0') {
+  if (tmpdir == nullptr || *tmpdir == '\0') {
     tmpdir = "/tmp";
   }
   std::string tmpl = std::string(tmpdir) + "/fcgi-concurrent-test-XXXXXX";
@@ -94,7 +94,7 @@ bool sockets_available() {
 /// Returns true if all bytes were written.
 bool fcgi_send_record(int fd, uint8_t type, uint16_t request_id, const uint8_t* body,
                       uint16_t body_len) {
-  uint8_t header[8];
+  std::array<uint8_t, 8> header{};
   header[0] = FCGI_VERSION_1;                                  // version
   header[1] = type;                                            // type
   header[2] = static_cast<uint8_t>((request_id >> 8) & 0xFF);  // request ID B1
@@ -106,10 +106,11 @@ bool fcgi_send_record(int fd, uint8_t type, uint16_t request_id, const uint8_t* 
 
   // Write header
   size_t off = 0;
-  while (off < sizeof(header)) {
-    ssize_t n = write(fd, header + off, sizeof(header) - off);
-    if (n <= 0)
+  while (off < header.size()) {
+    ssize_t n = write(fd, &header[off], header.size() - off);
+    if (n <= 0) {
       return false;
+    }
     off += static_cast<size_t>(n);
   }
 
@@ -117,9 +118,10 @@ bool fcgi_send_record(int fd, uint8_t type, uint16_t request_id, const uint8_t* 
   if (body != nullptr && body_len > 0) {
     off = 0;
     while (off < body_len) {
-      ssize_t n = write(fd, body + off, body_len - off);
-      if (n <= 0)
+      ssize_t n = write(fd, &body[off], body_len - off);
+      if (n <= 0) {
         return false;
+      }
       off += static_cast<size_t>(n);
     }
   }
@@ -131,9 +133,10 @@ bool fcgi_send_record(int fd, uint8_t type, uint16_t request_id, const uint8_t* 
 bool read_exact(int fd, uint8_t* buf, size_t len) {
   size_t off = 0;
   while (off < len) {
-    ssize_t n = read(fd, buf + off, len - off);
-    if (n <= 0)
+    ssize_t n = read(fd, &buf[off], len - off);
+    if (n <= 0) {
       return false;
+    }
     off += static_cast<size_t>(n);
   }
   return true;
@@ -142,9 +145,10 @@ bool read_exact(int fd, uint8_t* buf, size_t len) {
 /// Read an FCGI record header. Returns false on EOF/error.
 bool fcgi_read_header(int fd, uint8_t& out_type, uint16_t& out_request_id,
                       uint16_t& out_content_len) {
-  uint8_t header[8];
-  if (!read_exact(fd, header, 8))
+  std::array<uint8_t, 8> header{};
+  if (!read_exact(fd, header.data(), 8)) {
     return false;
+  }
 
   out_type = header[1];
   out_request_id = static_cast<uint16_t>((header[2] << 8) | header[3]);
@@ -153,9 +157,10 @@ bool fcgi_read_header(int fd, uint8_t& out_type, uint16_t& out_request_id,
 
   // Read and discard padding
   if (padding > 0) {
-    uint8_t dummy[256];
-    if (!read_exact(fd, dummy, padding))
+    std::array<uint8_t, 256> dummy{};
+    if (!read_exact(fd, dummy.data(), padding)) {
       return false;
+    }
   }
   return true;
 }
@@ -208,9 +213,8 @@ public:
 
     // Set a receive timeout to prevent test hangs in CI.
     // If the server doesn't respond within 5 seconds, read_response() fails.
-    struct timeval tv;
+    struct timeval tv {};
     tv.tv_sec = 5;
-    tv.tv_usec = 0;
     if (::setsockopt(fd_, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv)) < 0) {
       close(fd_);
       fd_ = -1;
@@ -243,13 +247,13 @@ public:
   /// @param path_info The PATH_INFO (e.g. "/r").
   /// @return true if the request was sent successfully.
   [[nodiscard]] bool send_get_request(uint16_t request_id, const std::string& query_string,
-                                      const std::string& path_info) {
+                                      const std::string& path_info) const {
     // --- BEGIN_REQUEST ---
-    uint8_t begin_body[8] = {};
+    std::array<uint8_t, 8> begin_body{};
     begin_body[0] = 0;  // role = FCGI_RESPONDER (high byte)
     begin_body[1] = 1;  // role = FCGI_RESPONDER (low byte)
     begin_body[2] = 0;  // flags = 0 (don't keep connection)
-    if (!fcgi_send_record(fd_, FCGI_BEGIN_REQUEST, request_id, begin_body, 8)) {
+    if (!fcgi_send_record(fd_, FCGI_BEGIN_REQUEST, request_id, begin_body.data(), 8)) {
       return false;
     }
 
@@ -276,12 +280,13 @@ public:
   /// Collects all FCGI_STDOUT content and returns it as a string.
   /// @param request_id The expected FCGI request ID.
   /// @return The response body, or empty string on error.
-  [[nodiscard]] std::string read_response(uint16_t request_id) {
+  [[nodiscard]] std::string read_response(uint16_t request_id) const {
     std::string body;
 
     while (true) {
-      uint8_t type;
-      uint16_t resp_id, content_len;
+      uint8_t type = 0;
+      uint16_t resp_id = 0;
+      uint16_t content_len = 0;
       if (!fcgi_read_header(fd_, type, resp_id, content_len)) {
         return "";
       }
@@ -300,6 +305,7 @@ public:
 
       if (type == FCGI_STDOUT) {
         if (!content.empty()) {
+          // NOLINTNEXTLINE(cppcoreguidelines-pro-type-reinterpret-cast)
           body.append(reinterpret_cast<const char*>(content.data()), content.size());
         }
       } else if (type == FCGI_END_REQUEST) {
@@ -401,7 +407,7 @@ static std::string fcgi_retry_transaction(const std::string& socket_path,
 // ============================================================
 
 class ConcurrentClientsTest : public ::testing::Test {
-protected:
+public:
   void SetUp() override {
     if (!sockets_available()) {
       GTEST_SKIP() << "Unix socket creation blocked by sandbox";
@@ -463,15 +469,16 @@ TEST_F(ConcurrentClientsTest, MultipleClientsProcessedConcurrently) {
 
   auto t_start = std::chrono::steady_clock::now();
 
-  for (int i = 0; i < kNumClients; ++i) {
+  for (size_t i = 0; i < static_cast<size_t>(kNumClients); ++i) {
     client_threads.emplace_back([&, i, this]() {
       std::string qs = "a=KNX:1/2/3&t=30&client=" + std::to_string(i);
       results[i] = fcgi_retry_transaction(socket_path_, qs, static_cast<uint16_t>(i + 1));
       success[i] = !results[i].empty();
     });
   }
-  for (auto& t : client_threads)
+  for (auto& t : client_threads) {
     t.join();
+  }
 
   auto t_end = std::chrono::steady_clock::now();
   auto total_ms = std::chrono::duration_cast<std::chrono::milliseconds>(t_end - t_start).count();
@@ -479,13 +486,15 @@ TEST_F(ConcurrentClientsTest, MultipleClientsProcessedConcurrently) {
   kill_workers(children);
 
   int fail_count = 0;
-  for (int i = 0; i < kNumClients; ++i)
-    if (!success[i])
+  for (size_t i = 0; i < static_cast<size_t>(kNumClients); ++i) {
+    if (!success[i]) {
       ++fail_count;
+    }
+  }
   // Allow up to 33% transient failures — fork/accept race window.
   EXPECT_LE(fail_count, 1) << fail_count << "/" << kNumClients << " clients failed";
 
-  for (int i = 0; i < kNumClients; ++i) {
+  for (size_t i = 0; i < static_cast<size_t>(kNumClients); ++i) {
     if (success[i]) {
       EXPECT_NE(results[i].find("{\"status\":\"ok\"}"), std::string::npos)
           << "Client " << i << " unexpected: " << results[i];
@@ -547,26 +556,29 @@ TEST_F(ConcurrentClientsTest, EnvironmentParamsNotSharedAcrossWorkers) {
   std::vector<std::string> results(kNumClients);
   std::vector<bool> success(kNumClients, false);
 
-  for (int i = 0; i < kNumClients; ++i) {
+  for (size_t i = 0; i < static_cast<size_t>(kNumClients); ++i) {
     client_threads.emplace_back([&, i, this]() {
       std::string qs = "a=KNX:1/2/3&client=" + std::to_string(i);
       results[i] = fcgi_retry_transaction(socket_path_, qs, static_cast<uint16_t>(i + 1));
       success[i] = !results[i].empty();
     });
   }
-  for (auto& t : client_threads)
+  for (auto& t : client_threads) {
     t.join();
+  }
   kill_workers(children);
 
   int fail_count = 0;
-  for (int i = 0; i < kNumClients; ++i)
-    if (!success[i])
+  for (size_t i = 0; i < static_cast<size_t>(kNumClients); ++i) {
+    if (!success[i]) {
       ++fail_count;
+    }
+  }
   // Allow up to 20% transient failures — fork/accept race window.
   EXPECT_LE(fail_count, kNumClients / 5)
       << fail_count << "/" << kNumClients << " clients failed after retries";
 
-  for (int i = 0; i < kNumClients; ++i) {
+  for (size_t i = 0; i < static_cast<size_t>(kNumClients); ++i) {
     if (success[i]) {
       std::string expected = "\"client\":\"" + std::to_string(i) + "\"";
       EXPECT_NE(results[i].find(expected), std::string::npos)
@@ -619,26 +631,29 @@ TEST_F(ConcurrentClientsTest, ManyConcurrentClientsStressTest) {
   std::vector<std::string> results(kNumClients);
   std::vector<bool> success(kNumClients, false);
 
-  for (int i = 0; i < kNumClients; ++i) {
+  for (size_t i = 0; i < static_cast<size_t>(kNumClients); ++i) {
     client_threads.emplace_back([&, i, this]() {
       std::string qs = "a=KNX:1/2/3&client=" + std::to_string(i);
       results[i] = fcgi_retry_transaction(socket_path_, qs, static_cast<uint16_t>(i + 1));
       success[i] = !results[i].empty();
     });
   }
-  for (auto& t : client_threads)
+  for (auto& t : client_threads) {
     t.join();
+  }
   kill_workers(children);
 
   int fail_count = 0;
-  for (int i = 0; i < kNumClients; ++i)
-    if (!success[i])
+  for (size_t i = 0; i < static_cast<size_t>(kNumClients); ++i) {
+    if (!success[i]) {
       ++fail_count;
+    }
+  }
   // Allow up to 20% transient failures in the stress test — fork/accept race.
   EXPECT_LE(fail_count, kNumClients / 5)
       << fail_count << "/" << kNumClients << " clients failed after retries";
 
-  for (int i = 0; i < kNumClients; ++i) {
+  for (size_t i = 0; i < static_cast<size_t>(kNumClients); ++i) {
     if (success[i]) {
       EXPECT_NE(results[i].find("{\"status\":\"ok\"}"), std::string::npos)
           << "Client " << i << " unexpected: " << results[i];

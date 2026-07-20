@@ -20,8 +20,6 @@
 
 #include "router.h"
 
-#include "../util/query_string.h"
-
 namespace cvknxd {
 
 Router::Router(KnxdClientInterface& knxd, SessionStore& sessions, int longpoll_timeout_sec,
@@ -37,10 +35,10 @@ FcgiResponse Router::route(const FcgiRequest& request) {
   const std::string_view path = request.path();
 
   if (path == "/l") {
-    const std::string body = login_handler_.handle(request.query_string);
+    std::string body = login_handler_.handle(request.query_string);
     response.body = std::move(body);
   } else if (path == "/r") {
-    const auto result = read_handler_.handle(request.query_string);
+    auto result = read_handler_.handle(request.query_string);
     response.status_code = result.http_status;
     response.body = std::move(result.body);
   } else if (path == "/w") {

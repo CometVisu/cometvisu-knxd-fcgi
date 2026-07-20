@@ -20,8 +20,6 @@
 
 #include "query_string.h"
 
-#include <algorithm>
-
 namespace cvknxd {
 
 /// Maximum number of unique parameter keys accepted in a single query string.
@@ -43,12 +41,15 @@ std::string url_decode(std::string_view str) {
   for (size_t i = 0; i < str.size(); ++i) {
     if (str[i] == '%' && i + 2 < str.size()) {
       auto from_hex = [](char c) -> int {
-        if (c >= '0' && c <= '9')
+        if (c >= '0' && c <= '9') {
           return c - '0';
-        if (c >= 'a' && c <= 'f')
+        }
+        if (c >= 'a' && c <= 'f') {
           return c - 'a' + 10;
-        if (c >= 'A' && c <= 'F')
+        }
+        if (c >= 'A' && c <= 'F') {
           return c - 'A' + 10;
+        }
         return -1;
       };
       int hi = from_hex(str[i + 1]);
@@ -71,15 +72,17 @@ std::string url_decode(std::string_view str) {
 }  // namespace
 
 QueryString::QueryString(std::string_view raw) {
-  if (raw.empty())
+  if (raw.empty()) {
     return;
+  }
 
   size_t pos = 0;
   size_t total_pairs = 0;
   while (pos < raw.size()) {
     // Enforce total pair limit
-    if (total_pairs >= kMaxTotalPairs)
+    if (total_pairs >= kMaxTotalPairs) {
       break;
+    }
     ++total_pairs;
 
     // Find key=value pair

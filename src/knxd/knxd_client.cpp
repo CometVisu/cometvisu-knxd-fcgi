@@ -990,8 +990,8 @@ KnxdClient::WaitResult KnxdClient::wait_for_activity(int timeout_ms) {
     return WaitResult::Timeout;
   }
 
-  struct pollfd pfds[2] = {};
-  int nfds = 0;
+  std::array<struct pollfd, 2> pfds = {};
+  size_t nfds = 0;
 
   if (group_fd >= 0) {
     pfds[nfds].fd = group_fd;
@@ -1004,7 +1004,7 @@ KnxdClient::WaitResult KnxdClient::wait_for_activity(int timeout_ms) {
     nfds++;
   }
 
-  int ret = ::poll(pfds, static_cast<nfds_t>(nfds), timeout_ms);
+  int ret = ::poll(pfds.data(), static_cast<nfds_t>(nfds), timeout_ms);
   if (ret <= 0) {
     return WaitResult::Timeout;
   }
@@ -1015,7 +1015,7 @@ KnxdClient::WaitResult KnxdClient::wait_for_activity(int timeout_ms) {
     return WaitResult::GroupData;
   }
   // cache_fd is at index 1 if group_fd is present, otherwise at index 0.
-  int cache_idx = (group_fd >= 0) ? 1 : 0;
+  size_t cache_idx = (group_fd >= 0) ? 1 : 0;
   if (cache_fd >= 0 && (pfds[cache_idx].revents & POLLIN) != 0) {
     return WaitResult::CacheData;
   }

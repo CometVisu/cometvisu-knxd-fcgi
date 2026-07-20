@@ -28,7 +28,6 @@
 
 #include <chrono>
 #include <mutex>
-#include <optional>
 #include <string>
 #include <string_view>
 #include <unordered_map>
@@ -85,7 +84,7 @@ private:
   int session_ttl_sec_;
   size_t max_sessions_;
 
-  [[nodiscard]] std::string generate_id();
+  [[nodiscard]] static std::string generate_id();
 };
 
 }  // namespace cvknxd

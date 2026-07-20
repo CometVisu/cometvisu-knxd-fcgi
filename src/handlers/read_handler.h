@@ -39,7 +39,6 @@
 #ifndef COMETVISU_KNXD_FCGI_READ_HANDLER_H_
 #define COMETVISU_KNXD_FCGI_READ_HANDLER_H_
 
-#include <cstdint>
 #include <optional>
 #include <string>
 #include <string_view>

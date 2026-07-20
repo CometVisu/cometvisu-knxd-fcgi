@@ -16,14 +16,13 @@
 #include <gtest/gtest.h>
 
 #include "handlers/read_handler.h"
-#include "knxd/knxd_protocol.h"
 #include "mock_knxd_socket.h"
 #include "state/session_store.h"
 
 using namespace cvknxd;
 
 class ReadHandlerTest : public ::testing::Test {
-protected:
+public:
   void SetUp() override {
     (void)knxd_.connect("/run/knx");
     (void)knxd_.open_group_socket(false);
@@ -409,12 +408,14 @@ TEST_F(ReadHandlerTest, GroupDrainBeforeCachePollReturnsKnxdPosition) {
 
 static uint32_t extractI_path(const std::string& body) {
   auto p = body.find("\"i\":");
-  if (p == std::string::npos)
+  if (p == std::string::npos) {
     return 0;
+  }
   p += 4;
   auto e = body.find_first_of(",}", p);
-  if (e == std::string::npos)
+  if (e == std::string::npos) {
     return 0;
+  }
   return static_cast<uint32_t>(std::stoul(body.substr(p, e - p)));
 }
 

@@ -36,17 +36,13 @@ size_t DebugLog::max_body_length_ = 1000;
 
 void DebugLog::init_from_env() {
   const char* val = std::getenv("DEBUG_BACKEND");
-  if (val == nullptr || val[0] == '\0') {
+  if (val == nullptr || *val == '\0') {
     enabled_ = false;
     return;
   }
   // Accept "1", "true", "yes", "on" (case-insensitive prefix match)
-  if (std::strcmp(val, "1") == 0 || std::strcmp(val, "true") == 0 || std::strcmp(val, "yes") == 0 ||
-      std::strcmp(val, "on") == 0) {
-    enabled_ = true;
-  } else {
-    enabled_ = false;
-  }
+  enabled_ = (std::strcmp(val, "1") == 0 || std::strcmp(val, "true") == 0 ||
+              std::strcmp(val, "yes") == 0 || std::strcmp(val, "on") == 0);
 }
 
 void DebugLog::write_timestamp(std::ostream& os) {
@@ -54,7 +50,7 @@ void DebugLog::write_timestamp(std::ostream& os) {
   auto time_t_now = std::chrono::system_clock::to_time_t(now);
   auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(now.time_since_epoch()) % 1000;
 
-  std::tm tm_now;
+  std::tm tm_now = {};
   localtime_r(&time_t_now, &tm_now);
 
   os << "[" << std::put_time(&tm_now, "%Y-%m-%d %H:%M:%S") << "." << std::setfill('0')
@@ -72,8 +68,9 @@ bool DebugLog::write_truncated(std::ostream& os, std::string_view text, size_t m
 }
 
 void DebugLog::http_request(std::string_view method, std::string_view uri) {
-  if (!enabled_)
+  if (!enabled_) {
     return;
+  }
 
   // Build the entire log line in a local buffer to write it atomically.
   // Multiple processes share stderr; building then writing in one call
@@ -87,8 +84,9 @@ void DebugLog::http_request(std::string_view method, std::string_view uri) {
 }
 
 void DebugLog::http_response(int status_code, std::string_view body) {
-  if (!enabled_)
+  if (!enabled_) {
     return;
+  }
 
   std::ostringstream oss;
   write_timestamp(oss);
@@ -103,8 +101,9 @@ void DebugLog::http_response(int status_code, std::string_view body) {
 
 void DebugLog::knxd_send(std::string_view operation, std::string_view address,
                          std::string_view details) {
-  if (!enabled_)
+  if (!enabled_) {
     return;
+  }
 
   std::ostringstream oss;
   write_timestamp(oss);
@@ -118,8 +117,9 @@ void DebugLog::knxd_send(std::string_view operation, std::string_view address,
 
 void DebugLog::knxd_recv(std::string_view operation, std::string_view address,
                          std::string_view data) {
-  if (!enabled_)
+  if (!enabled_) {
     return;
+  }
 
   std::ostringstream oss;
   write_timestamp(oss);

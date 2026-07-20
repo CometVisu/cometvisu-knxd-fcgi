@@ -30,7 +30,6 @@
 #pragma once
 
 #include "fcgi/fcgi_request.h"
-#include "fcgi/fcgi_server.h"
 #include "handlers/login_handler.h"
 #include "handlers/read_handler.h"
 #include "handlers/write_handler.h"
