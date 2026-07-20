@@ -43,11 +43,6 @@ FcgiServer::FcgiServer() = default;
 
 FcgiServer::~FcgiServer() {
   shutdown();
-  for (auto& t : workers_) {
-    if (t.joinable()) {
-      t.join();
-    }
-  }
 }
 
 void FcgiServer::set_handler(RequestHandler handler) {
@@ -220,7 +215,7 @@ void FcgiServer::shutdown() {
     socklen_t addr_len = sizeof(addr);
     // NOLINTNEXTLINE(cppcoreguidelines-pro-type-reinterpret-cast)
     if (::getsockname(listen_fd_, reinterpret_cast<struct sockaddr*>(&addr), &addr_len) == 0) {
-      const int wakeups = (num_workers_ > 0) ? num_workers_ : 64;
+      const int wakeups = 64;
       for (int i = 0; i < wakeups; ++i) {
         const int fd = ::socket(AF_UNIX, SOCK_STREAM | SOCK_NONBLOCK, 0);
         if (fd < 0) {
@@ -242,94 +237,6 @@ void FcgiServer::shutdown() {
     ::close(listen_fd_);
     listen_fd_ = -1;
   }
-}
-
-int FcgiServer::run_multithreaded(int num_threads) {
-  if (!handler_) {
-    std::cerr << "[ERROR] No request handler set\n";
-    return 1;
-  }
-
-  if (listen_fd_ < 0) {
-    std::cerr << "[ERROR] run_multithreaded() requires a listening socket (call listen() first)\n";
-    return 1;
-  }
-
-  num_threads = std::max(num_threads, 1);
-
-  // FCGX_Init() must be called once before any FCGX_Accept_r().
-  // It sets the libInitialized flag and performs platform-specific setup.
-  if (FCGX_Init() != 0) {
-    std::cerr << "[ERROR] FCGX_Init failed\n";
-    return 1;
-  }
-
-  shutdown_requested_.store(false, std::memory_order_relaxed);
-  num_workers_ = num_threads;
-
-  // Spawn worker threads. Each thread creates its own FCGX_Request and
-  // calls FCGX_Accept_r() on the shared listen socket. The OS serializes
-  // accept() calls across threads — when one thread accepts a connection,
-  // the next thread waiting on accept() gets the next connection.
-  for (int i = 0; i < num_threads; ++i) {
-    workers_.emplace_back([this]() {
-      FCGX_Request request;
-      if (FCGX_InitRequest(&request, listen_fd_, 0) != 0) {
-        std::cerr << "[ERROR] FCGX_InitRequest failed in worker thread\n";
-        return;
-      }
-
-      while (!shutdown_requested_.load(std::memory_order_relaxed)) {
-        const int rc = FCGX_Accept_r(&request);
-        if (rc < 0) {
-          // Accept failed — either shutdown (listen_fd_ closed) or error.
-          break;
-        }
-
-        // Read request parameters directly from the FCGI envp array.
-        // This avoids setting the global environ pointer, which would
-        // race with other worker threads doing the same concurrently.
-        const FcgiRequest req = read_request(request.envp);
-        DebugLog::http_request(req.request_method, req.request_uri);
-
-        const FcgiResponse resp = handler_(req);
-        DebugLog::http_response(resp.status_code, resp.body);
-
-        // Serialize FCGI output calls with a mutex.  libfcgi's internal
-        // stream and connection state is not fully thread-safe, so
-        // concurrent FCGX_PutStr / FCGX_Finish_r calls from different
-        // worker threads can corrupt shared buffers.
-        {
-          const std::scoped_lock lock(fcgi_mutex_);
-          write_response_direct(request, resp);
-          FCGX_Finish_r(&request);
-        }
-      }
-    });
-  }
-
-  // Wait for all worker threads to complete (triggered by shutdown()).
-  for (auto& t : workers_) {
-    t.join();
-  }
-  workers_.clear();
-
-  return 0;
-}
-
-void FcgiServer::write_response_direct(FCGX_Request& request, const FcgiResponse& response) {
-  // Build the full HTTP response as a single string.
-  std::string output;
-  output.reserve(256 + response.body.size());
-
-  output += "Status: " + std::to_string(response.status_code) + "\r\n";
-  output += "Content-Type: " + response.content_type + "; charset=utf-8\r\n";
-  output += "Content-Length: " + std::to_string(response.body.size()) + "\r\n";
-  output += "\r\n";
-  output += response.body;
-
-  // Write to the FCGX request output stream (direct socket mode).
-  FCGX_PutStr(output.data(), static_cast<int>(output.size()), request.out);
 }
 
 FcgiRequest FcgiServer::read_request() {

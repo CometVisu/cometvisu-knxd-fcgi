@@ -176,46 +176,17 @@ ReadResult ReadHandler::handle(std::string_view query_string) {
       break;
     }
 
-    // ---- Step 1: Poll knxd's cache for position updates. ----
-    // This is now the FIRST step in the poll loop.  Group telegrams
-    // are drained in the nullopt handler (if the cache poll fails due
-    // to group data) or in Step 3 (belt-and-suspenders after a
-    // successful cache poll).  This ensures ALL group-telegram data
-    // goes through the pending-data + position-confirmation pattern.
-    //
-    // cache_last_updates_2 does a combined poll on both the cache
-    // connection AND the group socket.  When group data is available,
-    // it returns nullopt — the handler then drains group telegrams
-    // with the pending-data pattern without the cache round-trip.
-    //
-    // This returns knxd's AUTHORITATIVE position — we never fabricate i=.
+    // ---- Poll knxd's cache for position updates. ----
+    // cache_last_updates_2 blocks until a telegram arrives or the
+    // timeout expires, then returns ALL changed addresses with the
+    // authoritative position (new_position).  This single call
+    // satisfies all three KNX rules:
+    //   Rule 1 (no duplicates): position comes from the same response
+    //   Rule 2 (immediate delivery): knxd responds as soon as a telegram arrives
+    //   Rule 3 (authoritative index): new_position from knxd
     const auto updates = knxd_.cache_last_updates_2(lastpos, remaining);
     if (!updates.has_value()) {
-      if (written) {
-        // Data was found during the initial read (lastpos==0) but the
-        // cache poll failed. Try to get authoritative position.
-        // KNX Rule 3: i must come from knxd, never fabricated.
-        if (!knxd_.is_connected()) {
-          (void)knxd_.reconnect();
-        }
-        auto pos = knxd_.cache_last_updates_2(lastpos, 0);
-        if (pos.has_value() && pos->new_position > lastpos) {
-          lastpos = pos->new_position;
-          break;
-        }
-        // Position not confirmed — retry up to kMaxTimeoutRetries times,
-        // then break.  This is the edge case where knxd is persistently
-        // unresponsive; delivering cached data with a stale position is
-        // better than losing the data entirely.  (KNX Rule 1: this may
-        // cause re-delivery on the next poll, but knxd being down is the
-        // bigger problem.)
-        if (timeout_retries < kMaxTimeoutRetries) {
-          timeout_retries++;
-          continue;
-        }
-        break;
-      }
-
+      // Cache poll failed (connection loss, timeout, etc.)
       if (!knxd_.is_connected()) {
         const auto now = std::chrono::steady_clock::now();
         const auto elapsed_sec =
@@ -226,78 +197,7 @@ ReadResult ReadHandler::handle(std::string_view query_string) {
           continue;
         }
       }
-
-      // Drain group telegrams into a pending list BEFORE adding to JSON.
-      // cache_last_updates_2 now does a combined poll (group socket + cache
-      // connection) and returns nullopt when group data is available.
-      //
-      // KNX Rule 2 (immediate delivery): we drain group telegrams here
-      // without waiting for a cache round-trip.
-      //
-      // KNX Rule 1 (no duplicates): we only deliver after confirming the
-      // authoritative position (Rule 3).  If position hasn't advanced,
-      // we discard pending data — the cache poll on the next iteration
-      // will re-deliver it with the correct position.
-      {
-        struct PendingMatch {
-          uint16_t addr;
-          std::vector<uint8_t> value_data;
-        };
-        std::vector<PendingMatch> pending;
-
-        uint16_t telegram_addr = 0;
-        std::vector<uint8_t> telegram_apdu;
-        while (knxd_.poll_group_telegram(telegram_addr, telegram_apdu)) {
-          if (eib_addrs.contains(telegram_addr) && !already_written.contains(telegram_addr)) {
-            ApduType apdu_type{};
-            std::vector<uint8_t> value_data;
-            if (parse_apdu(telegram_apdu, apdu_type, value_data) && apdu_type != ApduType::Read) {
-              pending.push_back({telegram_addr, std::move(value_data)});
-              already_written.insert(telegram_addr);
-            }
-          }
-        }
-
-        if (!pending.empty()) {
-          // Confirm authoritative position (KNX Rule 3).
-          // Retry up to 3 times with 10ms waits — knxd may not have
-          // processed the cache update yet (rare race).
-          bool position_ok = false;
-          for (int retry = 0; retry < 3 && !position_ok; retry++) {
-            if (!knxd_.is_connected()) {
-              (void)knxd_.reconnect();
-            }
-            auto pos = knxd_.cache_last_updates_2(lastpos, 0);
-            if (pos.has_value() && pos->new_position > lastpos) {
-              lastpos = pos->new_position;
-              position_ok = true;
-            } else if (retry < 2) {
-              std::this_thread::sleep_for(std::chrono::milliseconds(10));
-            }
-          }
-
-          if (position_ok) {
-            // Position confirmed — deliver immediately (KNX Rule 2).
-            for (const auto& m : pending) {
-              json.add_string(addr_key(m.addr),
-                              hex_encode(m.value_data.data(), m.value_data.size()));
-            }
-            written = true;
-            break;
-          }
-
-          // Position not confirmed after retries — DISCARD pending data.
-          // KNX Rule 1: never deliver with unconfirmed position.
-          // The telegrams were consumed from the group socket, but knxd
-          // has updated its cache — the next cache_last_updates_2 call
-          // will report the changed addresses with authoritative position.
-          for (const auto& m : pending) {
-            already_written.erase(m.addr);
-          }
-        }
-      }
-
-      // Transient failure with retries remaining — brief sleep and retry.
+      // Transient failure — brief sleep and retry.
       if (remaining > 0 && timeout_retries < kMaxTimeoutRetries) {
         timeout_retries++;
         std::this_thread::sleep_for(std::chrono::milliseconds(100));
@@ -310,7 +210,7 @@ ReadResult ReadHandler::handle(std::string_view query_string) {
     timeout_retries = 0;
     lastpos = updates->new_position;
 
-    // ---- Step 2: Process changed addresses from knxd's cache. ----
+    // ---- Process changed addresses from knxd's cache. ----
     for (const auto changed_addr : updates->changed_addresses) {
       if (!eib_addrs.contains(changed_addr)) {
         continue;
@@ -326,8 +226,8 @@ ReadResult ReadHandler::handle(std::string_view query_string) {
       }
     }
 
-    // ---- Step 3: Belt-and-suspenders drain (group telegrams that arrived
-    // during the cache poll, after knxd reported its position). ----
+    // ---- Belt-and-suspenders: drain group telegrams that arrived
+    // during the cache poll, after knxd reported its position. ----
     {
       uint16_t telegram_addr = 0;
       std::vector<uint8_t> telegram_apdu;

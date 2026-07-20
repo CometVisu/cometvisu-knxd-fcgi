@@ -21,9 +21,7 @@
 
 #include <atomic>
 #include <functional>
-#include <mutex>
 #include <string>
-#include <thread>
 #include <vector>
 
 #include "fcgi_request.h"
@@ -42,15 +40,9 @@ using RequestHandler = std::function<FcgiResponse(const FcgiRequest&)>;
 ///      by spawn-fcgi or a web server. In this mode, concurrency is handled by
 ///      running multiple process instances via spawn-fcgi.
 ///   2. Direct socket mode: call listen() to open a TCP or Unix socket for
-///      direct FCGI connections.
-///      - run() accepts from the socket (single accept loop; each
-///        call handles one client).  This is used by the fork-based
-///        worker pool in main.cpp — each child process calls run().
-///      - run_multithreaded() uses multiple std::thread workers, each
-///        running its own FCGX_Accept_r() on the shared listen socket.
-///   Note: main.cpp uses a fork-based worker pool (each child calls run())
-///   instead of run_multithreaded(), for compatibility with Docker < 20.10.10
-///   where seccomp blocks the clone3 syscall needed by std::thread.
+///      direct FCGI connections.  run() accepts from the socket.  For
+///      concurrent clients, main.cpp uses a fork-based worker pool —
+///      each child process calls run() with its own inherited listen fd.
 class FcgiServer {
 public:
   FcgiServer();
@@ -107,20 +99,6 @@ public:
   /// @return 0 on success, non-zero on error.
   int run();
 
-  /// Run the FCGI accept loop with multiple std::thread workers.
-  /// Each thread runs its own FCGX_Accept_r() on the shared listen socket.
-  /// The OS serializes accept() calls across threads, allowing multiple
-  /// concurrent clients to be served independently.
-  ///
-  /// This method uses std::thread internally.  On systems where thread
-  /// creation is blocked (e.g. Docker < 20.10.10 with glibc >= 2.34),
-  /// use the fork-based worker pool in main.cpp instead.
-  ///
-  /// Blocks until shutdown() is called from another thread.
-  /// @param num_threads Number of worker threads (minimum 1).
-  /// @return 0 on success, non-zero on error.
-  int run_multithreaded(int num_threads);
-
   /// Request shutdown of the accept loop(s).  Safe to call from any
   /// thread, signal handler, or parent process.
   /// This causes run() and run_multithreaded() to return.
@@ -131,9 +109,6 @@ private:
   int listen_fd_ = -1;
   FCGX_Request request_{};
   std::atomic<bool> shutdown_requested_{false};
-  std::vector<std::thread> workers_;
-  int num_workers_ = 0;               // set by run_multithreaded(), used by shutdown()
-  std::mutex fcgi_mutex_;             // serializes libfcgi calls in multithreaded mode
   sem_t* load_shed_sem_ = nullptr;    // shared semaphore for load shedding (/r only)
   sem_t* concurrency_sem_ = nullptr;  // shared semaphore for total request limiting
 
@@ -147,13 +122,10 @@ private:
   /// would overwrite environ concurrently.
   /// @param envp  FCGI parameter array (FCGX_Request::envp).
   [[nodiscard]] static FcgiRequest read_request(char** envp);
+
   /// Write an FcgiResponse to the appropriate output stream.
   /// Uses FCGX_Request::out when in direct socket mode, FCGI stdout otherwise.
   void write_response(const FcgiResponse& response);
-  /// Write an FcgiResponse to a specific FCGX_Request output stream.
-  /// Used by both worker threads (run_multithreaded) and child
-  /// processes (fork-based pool in main.cpp).
-  static void write_response_direct(FCGX_Request& request, const FcgiResponse& response);
 };
 
 }  // namespace cvknxd

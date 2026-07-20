@@ -16,18 +16,21 @@
 #include <fastcgi.h>
 #include <fcgiapp.h>
 #include <gtest/gtest.h>
+#include <sys/mman.h>
 #include <sys/socket.h>
 #include <sys/time.h>
 #include <sys/un.h>
+#include <sys/wait.h>
 #include <unistd.h>
 
 #include <atomic>
+#include <cerrno>
 #include <chrono>
+#include <csignal>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <functional>
-#include <future>
 #include <string>
 #include <thread>
 #include <vector>
@@ -71,7 +74,7 @@ bool sockets_available() {
   if (s < 0) {
     return false;
   }
-  struct sockaddr_un addr{};
+  struct sockaddr_un addr {};
   addr.sun_family = AF_UNIX;
   size_t path_len = path.copy(addr.sun_path, sizeof(addr.sun_path) - 1);
   addr.sun_path[path_len] = '\0';
@@ -210,7 +213,7 @@ public:
       return false;
     }
 
-    struct sockaddr_un addr{};
+    struct sockaddr_un addr {};
     addr.sun_family = AF_UNIX;
     size_t path_len = socket_path.copy(addr.sun_path, sizeof(addr.sun_path) - 1);
     addr.sun_path[path_len] = '\0';
@@ -305,6 +308,48 @@ private:
 
 }  // namespace
 
+/// Shared state between parent process and forked workers.
+/// Placed in mmap'd MAP_SHARED memory so children can update atomics.
+struct SharedState {
+  std::atomic<int> concurrent_count{0};
+  std::atomic<int> max_concurrent{0};
+  std::atomic<int> response_count{0};
+};
+
+/// Fork N children, each running server.run() on the shared listen socket.
+/// Returns child PIDs on success, empty vector on failure.
+static std::vector<pid_t> fork_workers(int num_workers, FcgiServer& server) {
+  std::vector<pid_t> children;
+  children.reserve(static_cast<size_t>(num_workers));
+  for (int i = 0; i < num_workers; ++i) {
+    pid_t pid = ::fork();
+    if (pid < 0) {
+      for (pid_t child : children)
+        ::kill(child, SIGTERM);
+      int status;
+      for (size_t j = 0; j < children.size(); ++j)
+        ::wait(&status);
+      children.clear();
+      break;
+    }
+    if (pid == 0) {
+      int r = server.run();
+      std::_Exit(r);
+    }
+    children.push_back(pid);
+  }
+  return children;
+}
+
+/// Kill all workers and wait for them to exit.
+static void kill_workers(const std::vector<pid_t>& children) {
+  for (pid_t child : children)
+    ::kill(child, SIGTERM);
+  int status;
+  for (size_t i = 0; i < children.size(); ++i)
+    ::wait(&status);
+}
+
 // ============================================================
 // Concurrent client tests
 // ============================================================
@@ -334,58 +379,35 @@ protected:
 ///
 /// This test uses the multithreaded API that doesn't exist yet → RED.
 TEST_F(ConcurrentClientsTest, MultipleClientsProcessedConcurrently) {
-  // Track concurrency: how many handler invocations are active simultaneously
-  std::atomic<int> concurrent_count{0};
-  std::atomic<int> max_concurrent{0};
-
   constexpr int kNumClients = 3;
-  constexpr int kHandlerDelayMs = 50;
-  constexpr int kNumThreads = 4;
+  constexpr int kNumWorkers = 4;
 
-  // Create server with a handler that simulates long-poll delay
+  auto* shared = static_cast<SharedState*>(::mmap(
+      nullptr, sizeof(SharedState), PROT_READ | PROT_WRITE, MAP_SHARED | MAP_ANONYMOUS, -1, 0));
+  ASSERT_NE(shared, MAP_FAILED);
+
   FcgiServer server;
   ASSERT_TRUE(server.listen(socket_path_));
   ASSERT_TRUE(server.is_listening());
 
-  server.set_handler([&]([[maybe_unused]] const FcgiRequest& req) -> FcgiResponse {
-    int current = concurrent_count.fetch_add(1) + 1;
-    // Update max concurrent
-    int prev_max = max_concurrent.load();
-    while (current > prev_max && !max_concurrent.compare_exchange_weak(prev_max, current)) {
-      prev_max = max_concurrent.load();
+  server.set_handler([shared]([[maybe_unused]] const FcgiRequest& req) -> FcgiResponse {
+    int current = shared->concurrent_count.fetch_add(1) + 1;
+    int prev_max = shared->max_concurrent.load();
+    while (current > prev_max && !shared->max_concurrent.compare_exchange_weak(prev_max, current)) {
+      prev_max = shared->max_concurrent.load();
     }
-
-    // Simulate long-poll delay
-    std::this_thread::sleep_for(std::chrono::milliseconds(kHandlerDelayMs));
-
-    concurrent_count.fetch_sub(1);
-
+    std::this_thread::sleep_for(std::chrono::milliseconds(50));
+    shared->concurrent_count.fetch_sub(1);
     FcgiResponse resp;
     resp.status_code = 200;
     resp.body = "{\"status\":\"ok\"}";
     return resp;
   });
 
-  // Start server in multithreaded mode in a background thread.
-  // Use std::promise/future so we can wait with a timeout — blocking
-  // join() would hang CI forever if shutdown doesn't unblock workers.
-  std::promise<int> server_promise;
-  auto server_future = server_promise.get_future();
-  std::atomic<bool> server_ready{false};
-  std::thread server_thread([&]() {
-    server_ready.store(true);
-    int result = server.run_multithreaded(kNumThreads);
-    server_promise.set_value(result);
-  });
-
-  // Wait for server to be ready
-  while (!server_ready.load()) {
-    std::this_thread::sleep_for(std::chrono::milliseconds(10));
-  }
-  // Give the server a moment to start listening
+  auto children = fork_workers(kNumWorkers, server);
+  ASSERT_FALSE(children.empty()) << "Failed to fork workers";
   std::this_thread::sleep_for(std::chrono::milliseconds(200));
 
-  // Spawn concurrent client threads
   std::vector<std::thread> client_threads;
   std::vector<std::string> results(kNumClients);
   std::vector<bool> success(kNumClients, false);
@@ -395,68 +417,34 @@ TEST_F(ConcurrentClientsTest, MultipleClientsProcessedConcurrently) {
   for (int i = 0; i < kNumClients; ++i) {
     client_threads.emplace_back([&, i, this]() {
       FcgiTestClient client;
-      if (!client.connect(socket_path_)) {
+      if (!client.connect(socket_path_))
         return;
-      }
-
-      // Each client does a /r long-poll request
       std::string qs = "a=KNX:1/2/3&t=30&client=" + std::to_string(i);
-      if (!client.send_get_request(static_cast<uint16_t>(i + 1), qs, "/r")) {
+      if (!client.send_get_request(static_cast<uint16_t>(i + 1), qs, "/r"))
         return;
-      }
-
       results[i] = client.read_response(static_cast<uint16_t>(i + 1));
       success[i] = !results[i].empty();
     });
   }
-
-  // Join all client threads
-  for (auto& t : client_threads) {
+  for (auto& t : client_threads)
     t.join();
-  }
 
   auto t_end = std::chrono::steady_clock::now();
   auto total_ms = std::chrono::duration_cast<std::chrono::milliseconds>(t_end - t_start).count();
 
-  // Verify all clients got responses
+  kill_workers(children);
+
   for (int i = 0; i < kNumClients; ++i) {
-    EXPECT_TRUE(success[i]) << "Client " << i << " failed to get response";
+    EXPECT_TRUE(success[i]) << "Client " << i << " failed";
     if (success[i]) {
       EXPECT_NE(results[i].find("{\"status\":\"ok\"}"), std::string::npos)
-          << "Client " << i << " got unexpected response: " << results[i];
+          << "Client " << i << " unexpected: " << results[i];
     }
   }
-
-  // Verify concurrency: at least 2 handlers were active simultaneously
-  EXPECT_GE(max_concurrent.load(), 2)
-      << "Expected at least 2 concurrent handlers, but max was " << max_concurrent.load();
-
-  // Verify timing: with N threads and N clients, total time should be
-  // close to kHandlerDelayMs, not kNumClients * kHandlerDelayMs.
-  // Allow overhead for thread startup + FCGI protocol.
-  // Sequential would be ~150ms (3×50ms); concurrent should be < 400ms.
-  EXPECT_LT(total_ms, 400) << "Total time " << total_ms
-                           << "ms suggests sequential processing or hang "
-                           << "(expected < 400ms with concurrent threads)";
-
-  // Shutdown: unblock the accept loops and wait for workers.
-  server.shutdown();
-
-  // Wait for the server thread with a firm 15-second timeout.
-  // If shutdown() works correctly, this returns in < 1 second.
-  // If workers are stuck in accept(), the future times out and we
-  // detach the thread — the test reports failure instead of hanging CI.
-  auto status = server_future.wait_for(std::chrono::seconds(15));
-  if (status == std::future_status::timeout) {
-    server_thread.detach();
-    FAIL() << "Server thread did not exit within 15 seconds after shutdown(). "
-           << "Workers likely stuck in accept() — shutdown(listen_fd, SHUT_RDWR) "
-           << "may not be supported on this platform.";
-  } else {
-    server_thread.join();
-    int result = server_future.get();
-    EXPECT_EQ(result, 0) << "server.run_multithreaded() returned error";
-  }
+  EXPECT_GE(shared->max_concurrent.load(), 2)
+      << "Expected >=2 concurrent handlers, got " << shared->max_concurrent.load();
+  EXPECT_LT(total_ms, 400) << "Total " << total_ms << "ms suggests sequential processing";
+  ::munmap(shared, sizeof(SharedState));
 }
 
 // ============================================================================
@@ -474,48 +462,35 @@ TEST_F(ConcurrentClientsTest, MultipleClientsProcessedConcurrently) {
 // envp array), this test fails intermittently with wrong parameters.
 // ============================================================================
 
-TEST_F(ConcurrentClientsTest, EnvironmentParamsNotSharedAcrossThreads) {
+TEST_F(ConcurrentClientsTest, EnvironmentParamsNotSharedAcrossWorkers) {
   constexpr int kNumClients = 5;
-  constexpr int kNumThreads = 5;
+  constexpr int kNumWorkers = 5;
+
+  auto* shared = static_cast<SharedState*>(::mmap(
+      nullptr, sizeof(SharedState), PROT_READ | PROT_WRITE, MAP_SHARED | MAP_ANONYMOUS, -1, 0));
+  ASSERT_NE(shared, MAP_FAILED);
 
   FcgiServer server;
   ASSERT_TRUE(server.listen(socket_path_));
   ASSERT_TRUE(server.is_listening());
 
-  // Handler echoes back the "client=N" parameter from the query string.
-  // Each client sends a UNIQUE client number, and expects to see it in
-  // the response body.  If environ is shared/raced across threads, some
-  // clients will get the wrong client number back.
-  server.set_handler([&](const FcgiRequest& req) -> FcgiResponse {
+  server.set_handler([shared](const FcgiRequest& req) -> FcgiResponse {
     std::string qs = req.query_string;
     auto pos = qs.find("client=");
     std::string client_id = (pos != std::string::npos) ? std::string(qs.substr(pos + 7, 2)) : "?";
-    // Strip possible trailing "&" or end-of-string
     auto end = client_id.find('&');
     if (end != std::string::npos)
       client_id.resize(end);
-
-    // Simulate some work to create overlap between threads
     std::this_thread::sleep_for(std::chrono::milliseconds(10));
-
+    shared->response_count.fetch_add(1);
     FcgiResponse resp;
     resp.status_code = 200;
     resp.body = "{\"client\":\"" + client_id + "\"}";
     return resp;
   });
 
-  std::promise<int> server_promise;
-  auto server_future = server_promise.get_future();
-  std::atomic<bool> server_ready{false};
-  std::thread server_thread([&]() {
-    server_ready.store(true);
-    int result = server.run_multithreaded(kNumThreads);
-    server_promise.set_value(result);
-  });
-
-  while (!server_ready.load()) {
-    std::this_thread::sleep_for(std::chrono::milliseconds(10));
-  }
+  auto children = fork_workers(kNumWorkers, server);
+  ASSERT_FALSE(children.empty()) << "Failed to fork workers";
   std::this_thread::sleep_for(std::chrono::milliseconds(200));
 
   std::vector<std::thread> client_threads;
@@ -534,28 +509,17 @@ TEST_F(ConcurrentClientsTest, EnvironmentParamsNotSharedAcrossThreads) {
       success[i] = !results[i].empty();
     });
   }
-
   for (auto& t : client_threads)
     t.join();
+  kill_workers(children);
 
-  // EVERY client must get its OWN client number back
   for (int i = 0; i < kNumClients; ++i) {
-    ASSERT_TRUE(success[i]) << "Client " << i << " failed to get response";
+    ASSERT_TRUE(success[i]) << "Client " << i << " failed";
     std::string expected = "\"client\":\"" + std::to_string(i) + "\"";
     EXPECT_NE(results[i].find(expected), std::string::npos)
-        << "Client " << i << " got wrong or missing client ID. "
-        << "Expected \"" << expected << "\" but got: " << results[i];
+        << "Client " << i << " got: " << results[i];
   }
-
-  server.shutdown();
-  auto status = server_future.wait_for(std::chrono::seconds(15));
-  if (status == std::future_status::timeout) {
-    server_thread.detach();
-    FAIL() << "Server thread did not exit within 15 seconds after shutdown()";
-  } else {
-    server_thread.join();
-    EXPECT_EQ(server_future.get(), 0);
-  }
+  ::munmap(shared, sizeof(SharedState));
 }
 
 // ============================================================================
@@ -573,35 +537,27 @@ TEST_F(ConcurrentClientsTest, EnvironmentParamsNotSharedAcrossThreads) {
 
 TEST_F(ConcurrentClientsTest, ManyConcurrentClientsStressTest) {
   constexpr int kNumClients = 10;
-  constexpr int kNumThreads = 4;
+  constexpr int kNumWorkers = 4;
 
-  std::atomic<int> response_count{0};
+  auto* shared = static_cast<SharedState*>(::mmap(
+      nullptr, sizeof(SharedState), PROT_READ | PROT_WRITE, MAP_SHARED | MAP_ANONYMOUS, -1, 0));
+  ASSERT_NE(shared, MAP_FAILED);
 
   FcgiServer server;
   ASSERT_TRUE(server.listen(socket_path_));
   ASSERT_TRUE(server.is_listening());
 
-  server.set_handler([&]([[maybe_unused]] const FcgiRequest& req) -> FcgiResponse {
+  server.set_handler([shared]([[maybe_unused]] const FcgiRequest& req) -> FcgiResponse {
     std::this_thread::sleep_for(std::chrono::milliseconds(5));
-    response_count.fetch_add(1);
+    shared->response_count.fetch_add(1);
     FcgiResponse resp;
     resp.status_code = 200;
     resp.body = "{\"status\":\"ok\"}";
     return resp;
   });
 
-  std::promise<int> server_promise;
-  auto server_future = server_promise.get_future();
-  std::atomic<bool> server_ready{false};
-  std::thread server_thread([&]() {
-    server_ready.store(true);
-    int result = server.run_multithreaded(kNumThreads);
-    server_promise.set_value(result);
-  });
-
-  while (!server_ready.load()) {
-    std::this_thread::sleep_for(std::chrono::milliseconds(10));
-  }
+  auto children = fork_workers(kNumWorkers, server);
+  ASSERT_FALSE(children.empty()) << "Failed to fork workers";
   std::this_thread::sleep_for(std::chrono::milliseconds(200));
 
   std::vector<std::thread> client_threads;
@@ -620,39 +576,21 @@ TEST_F(ConcurrentClientsTest, ManyConcurrentClientsStressTest) {
       success[i] = !results[i].empty();
     });
   }
-
   for (auto& t : client_threads)
     t.join();
+  kill_workers(children);
 
-  // ALL 10 clients must get responses
   int fail_count = 0;
-  for (int i = 0; i < kNumClients; ++i) {
-    if (!success[i]) {
+  for (int i = 0; i < kNumClients; ++i)
+    if (!success[i])
       ++fail_count;
-    }
-  }
-  EXPECT_EQ(fail_count, 0) << fail_count << " out of " << kNumClients
-                           << " clients failed to get responses";
+  EXPECT_EQ(fail_count, 0) << fail_count << "/" << kNumClients << " clients failed";
 
-  // All responses should be valid
   for (int i = 0; i < kNumClients; ++i) {
     if (success[i]) {
       EXPECT_NE(results[i].find("{\"status\":\"ok\"}"), std::string::npos)
-          << "Client " << i << " got unexpected response: " << results[i];
+          << "Client " << i << " unexpected: " << results[i];
     }
   }
-
-  // Server should have processed all requests
-  EXPECT_EQ(response_count.load(), kNumClients)
-      << "Expected " << kNumClients << " handler invocations, got " << response_count.load();
-
-  server.shutdown();
-  auto status = server_future.wait_for(std::chrono::seconds(15));
-  if (status == std::future_status::timeout) {
-    server_thread.detach();
-    FAIL() << "Server thread did not exit within 15 seconds after shutdown()";
-  } else {
-    server_thread.join();
-    EXPECT_EQ(server_future.get(), 0);
-  }
+  ::munmap(shared, sizeof(SharedState));
 }

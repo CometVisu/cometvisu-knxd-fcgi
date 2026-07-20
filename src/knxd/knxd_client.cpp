@@ -855,17 +855,7 @@ std::optional<LastUpdatesResult> KnxdClient::cache_last_updates_2(uint32_t start
         continue;  // Unknown message on cache connection — skip
       }
 
-      // Need more data — poll BOTH the cache connection AND the group socket.
-      // Polling both ensures that when a group telegram arrives for a
-      // requested address, the handler wakes immediately (via the group
-      // socket) rather than waiting for the cache round-trip.  Without
-      // this, on a busy KNX bus the handler would make one cache round-trip
-      // per non-matching telegram, multiplying latency before the matching
-      // telegram is detected.
-      //
-      // We return nullopt when group data is available, which signals the
-      // handler to drain group telegrams and retry.  This avoids the
-      // round-trip overhead because group telegrams carry the actual data.
+      // Need more data — poll the cache connection.
       auto remaining = std::chrono::duration_cast<std::chrono::milliseconds>(
                            deadline - std::chrono::steady_clock::now())
                            .count();
@@ -873,29 +863,12 @@ std::optional<LastUpdatesResult> KnxdClient::cache_last_updates_2(uint32_t start
         return std::nullopt;
       }
 
-      // Get the group socket fd for the combined poll.
-      int group_fd_val = -1;
-      {
-        std::lock_guard<std::recursive_mutex> main_lock(impl_->mutex);
-        group_fd_val = impl_->fd;
-      }
+      struct pollfd pfd = {};
+      pfd.fd = *cache_fd;
+      pfd.events = POLLIN;
+      pfd.revents = 0;
 
-      struct pollfd pfds[2] = {};
-      int nfds = 0;
-
-      pfds[nfds].fd = *cache_fd;
-      pfds[nfds].events = POLLIN;
-      pfds[nfds].revents = 0;
-      nfds++;
-
-      if (group_fd_val >= 0) {
-        pfds[nfds].fd = group_fd_val;
-        pfds[nfds].events = POLLIN;
-        pfds[nfds].revents = 0;
-        nfds++;
-      }
-
-      int poll_ret = ::poll(pfds, static_cast<nfds_t>(nfds), static_cast<int>(remaining));
+      int poll_ret = ::poll(&pfd, 1, static_cast<int>(remaining));
       if (poll_ret < 0) {
         if (errno == EINTR) {
           continue;
@@ -906,18 +879,12 @@ std::optional<LastUpdatesResult> KnxdClient::cache_last_updates_2(uint32_t start
         return std::nullopt;  // timeout — not a connection error
       }
 
-      // Check group socket first — if data is available, return nullopt
-      // so the handler drains group telegrams before retrying the cache poll.
-      if (group_fd_val >= 0 && (pfds[1].revents & POLLIN) != 0) {
-        return std::nullopt;  // group data available — handler will drain and retry
-      }
-
       // Check if the cache connection has data
-      if ((pfds[0].revents & (POLLHUP | POLLERR)) != 0) {
+      if ((pfd.revents & (POLLHUP | POLLERR)) != 0) {
         return std::nullopt;  // connection hangup — retryable
       }
 
-      if ((pfds[0].revents & POLLIN) != 0) {
+      if ((pfd.revents & POLLIN) != 0) {
         // Read data from cache socket
         std::array<uint8_t, 4096> tmp{};
         ssize_t n = ::read(*cache_fd, tmp.data(), tmp.size());
