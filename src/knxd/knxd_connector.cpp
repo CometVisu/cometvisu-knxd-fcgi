@@ -13,10 +13,16 @@
 // You should have received a copy of the GNU General Public License
 // along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
+/**
+ * @file knxd_connector.cpp
+ * @brief Implementation of the exponential backoff knxd connector.
+ */
+
 #include "knxd_connector.h"
 
 #include <unistd.h>
 
+#include <array>
 #include <iostream>
 
 namespace cvknxd {
@@ -26,8 +32,8 @@ bool connect_knxd_with_retry(KnxdClientInterface& knxd, const char* socket_path,
   // Retry delays in milliseconds applied BETWEEN attempts.
   // Standard (has_worked_before=false): 500ms, 1s, 2s  → 4 attempts total
   // Extended (has_worked_before=true):  500ms, 1s, 2s, 4s, 8s → 6 attempts total
-  const int default_delays_ms[] = {500, 1000, 2000, 4000, 8000};
-  const int* delays_ms = custom_delays_ms != nullptr ? custom_delays_ms : default_delays_ms;
+  constexpr std::array<int, 5> default_delays_ms = {500, 1000, 2000, 4000, 8000};
+  const int* delays_ms = custom_delays_ms != nullptr ? custom_delays_ms : default_delays_ms.data();
   const int num_retries = has_worked_before ? 5 : 3;
   const int total_attempts = num_retries + 1;
 

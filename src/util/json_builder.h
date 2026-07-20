@@ -13,6 +13,18 @@
 // You should have received a copy of the GNU General Public License
 // along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
+/**
+ * @file json_builder.h
+ * @brief Minimal JSON builder for the simple JSON responses used by the
+ *        CometVisu protocol.
+ *
+ * This is deliberately minimal — the CometVisu protocol only uses flat
+ * JSON objects with string and integer values.  No external JSON library
+ * dependency is needed.  The builder escapes only the four JSON-special
+ * characters (", \, \n, \r, \t) because all values come from hex_encode()
+ * (always [0-9a-f]) or fixed protocol strings.
+ */
+
 #pragma once
 
 #include <string>
@@ -20,8 +32,22 @@
 
 namespace cvknxd {
 
-/// Minimal JSON builder for the simple JSON responses used by the CometVisu protocol.
-/// No external dependency needed — the protocol only requires flat objects.
+/**
+ * @brief Minimal JSON builder.
+ *
+ * Builds JSON strings incrementally with automatic comma insertion.
+ * Callers must ensure start_object() / end_object() are balanced.
+ *
+ * Example:
+ * @code
+ *   JsonBuilder jb;
+ *   jb.start_object();
+ *   jb.add_string("v", "0.0.2");
+ *   jb.add_string("s", session_id);
+ *   jb.end_object();
+ *   std::string json = jb.take();  // {"v":"0.0.2","s":"abc123"}
+ * @endcode
+ */
 class JsonBuilder {
 public:
   JsonBuilder() = default;

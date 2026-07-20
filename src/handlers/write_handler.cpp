@@ -13,6 +13,19 @@
 // You should have received a copy of the GNU General Public License
 // along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
+/**
+ * @file write_handler.cpp
+ * @brief Implementation of the CometVisu /w (write) endpoint handler.
+ *
+ * Mirrors the reference eibwrite-cgi.c: hex-decodes the `v` parameter,
+ * validates the APCI byte, builds an APDU, and sends it via send_group_packet().
+ *
+ * Extensions beyond eibwrite-cgi:
+ *   - Multi-address writes (the `a` parameter can appear multiple times)
+ *   - Error reporting: returns HTTP 503 when all writes to valid addresses fail
+ *   - Returns 404 when ALL addresses have an invalid format
+ */
+
 #include "write_handler.h"
 
 #include "knxd/knxd_client.h"
@@ -55,11 +68,12 @@ WriteResult WriteHandler::handle(std::string_view query_string) {
   }
 
   // Validate that the first data byte contains the Write APCI (A_GroupValue_Write).
-  // The reference eibwrite-cgi.c expects the hex value "v" to include the APCI byte
-  // (e.g. "v=800c6f" for a 2-byte value 0x0c6f). We prepend only the leading 0x00
-  // to form the complete APDU: [0x00, APCI, value_bytes...].
+  // The reference eibwrite-cgi.c expects the hex value "v" to include the APCI
+  // byte (e.g. "800c6f" for a 2-byte value 0x0c6f).  We prepend only the
+  // leading 0x00 to form the complete APDU: [0x00, APCI, value_bytes...].
+  // Reject values that don't have the Write bit (0x80) set — this catches
+  // accidental use of raw data values without the APCI prefix.
   if (hex_data.empty() || (hex_data.front() & 0x80) != 0x80) {
-    // Only A_GroupValue_Write is allowed (matching reference check).
     return result;
   }
 

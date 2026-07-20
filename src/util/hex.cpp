@@ -13,10 +13,15 @@
 // You should have received a copy of the GNU General Public License
 // along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
+/**
+ * @file hex.cpp
+ * @brief Implementation of hex encoding/decoding.
+ */
+
 #include "hex.h"
 
+#include <array>
 #include <cctype>
-#include <stdexcept>
 
 namespace cvknxd {
 
@@ -29,17 +34,20 @@ std::vector<uint8_t> hex_decode(std::string_view hex) {
   for (size_t i = 0; i < hex.size(); i += 2) {
     char hi = hex[i];
     char lo = hex[i + 1];
-    if (!std::isxdigit(static_cast<unsigned char>(hi)) ||
-        !std::isxdigit(static_cast<unsigned char>(lo))) {
+    if (std::isxdigit(static_cast<unsigned char>(hi)) == 0 ||
+        std::isxdigit(static_cast<unsigned char>(lo)) == 0) {
       return {};
     }
     auto nibble = [](char c) -> uint8_t {
-      if (c >= '0' && c <= '9')
+      if (c >= '0' && c <= '9') {
         return static_cast<uint8_t>(c - '0');
-      if (c >= 'a' && c <= 'f')
+      }
+      if (c >= 'a' && c <= 'f') {
         return static_cast<uint8_t>(c - 'a' + 10);
-      if (c >= 'A' && c <= 'F')
+      }
+      if (c >= 'A' && c <= 'F') {
         return static_cast<uint8_t>(c - 'A' + 10);
+      }
       return 0;
     };
     result.push_back(static_cast<uint8_t>((nibble(hi) << 4) | nibble(lo)));
@@ -48,7 +56,8 @@ std::vector<uint8_t> hex_decode(std::string_view hex) {
 }
 
 std::string hex_encode(const uint8_t* data, size_t len) {
-  static constexpr char kHexChars[] = "0123456789abcdef";
+  static constexpr std::array<char, 16> kHexChars = {'0', '1', '2', '3', '4', '5', '6', '7',
+                                                     '8', '9', 'a', 'b', 'c', 'd', 'e', 'f'};
   std::string result;
   result.reserve(len * 2);
   for (size_t i = 0; i < len; ++i) {

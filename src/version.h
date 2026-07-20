@@ -13,6 +13,16 @@
 // You should have received a copy of the GNU General Public License
 // along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
+/**
+ * @file version.h
+ * @brief Compile-time version and build information.
+ *
+ * Values are injected by CMake via preprocessor definitions:
+ *   - APP_VERSION from CMake PROJECT_VERSION
+ *   - GIT_HASH from `git rev-parse --short HEAD`
+ *   - KNXD_BUILD_VERSION / KNXD_BUILD_GIT_HASH from the knxd installation
+ */
+
 #pragma once
 
 #include <string_view>

@@ -16,14 +16,13 @@
 #include <gtest/gtest.h>
 
 #include "handlers/read_handler.h"
-#include "knxd/knxd_protocol.h"
 #include "mock_knxd_socket.h"
 #include "state/session_store.h"
 
 using namespace cvknxd;
 
 class ReadHandlerTest : public ::testing::Test {
-protected:
+public:
   void SetUp() override {
     (void)knxd_.connect("/run/knx");
     (void)knxd_.open_group_socket(false);
@@ -409,12 +408,14 @@ TEST_F(ReadHandlerTest, GroupDrainBeforeCachePollReturnsKnxdPosition) {
 
 static uint32_t extractI_path(const std::string& body) {
   auto p = body.find("\"i\":");
-  if (p == std::string::npos)
+  if (p == std::string::npos) {
     return 0;
+  }
   p += 4;
   auto e = body.find_first_of(",}", p);
-  if (e == std::string::npos)
+  if (e == std::string::npos) {
     return 0;
+  }
   return static_cast<uint32_t>(std::stoul(body.substr(p, e - p)));
 }
 
@@ -997,4 +998,119 @@ TEST_F(ReadHandlerTest, NoAddressesReturns400) {
   auto result = handler.handle("s=abc&t=0");
   EXPECT_EQ(result.http_status, 400);
   EXPECT_NE(result.body.find("\"error\":\"missing address\""), std::string::npos);
+}
+
+// ============================================================================
+// Tests for belt-and-suspenders group telegram drain.
+//
+// Group telegrams are drained after a successful cache poll (Step 3).
+// This ensures all data is delivered with the authoritative position
+// from cache_last_updates_2.
+// ============================================================================
+
+/// Group telegram arrives during the cache poll and is caught by the
+/// belt-and-suspenders drain.  Data is delivered with authoritative position.
+TEST_F(ReadHandlerTest, GroupTelegramCaughtInBeltAndSuspenders) {
+  ReadHandler handler(knxd_, sessions_);
+
+  // Cache poll returns a non-matching address with position 5
+  knxd_.set_last_updates_result(0, {0x0B04}, 5);
+  knxd_.set_cached_value(0x0B04, {0x01});
+
+  // Matching group telegram arrives (caught by belt-and-suspenders)
+  knxd_.enqueue_telegram(0x0A03, {0x00, 0x80, 0x42});
+
+  auto result = handler.handle("a=1/2/3");
+
+  EXPECT_EQ(result.http_status, 200);
+  EXPECT_NE(result.body.find("1/2/3"), std::string::npos);
+  EXPECT_NE(result.body.find("42"), std::string::npos);
+  // Position comes from the cache poll (5), not fabricated
+  EXPECT_NE(result.body.find("\"i\":5"), std::string::npos);
+}
+
+/// Non-matching group telegrams are drained by belt-and-suspenders
+/// and discarded.  The matching telegram comes from the cache poll.
+TEST_F(ReadHandlerTest, NonMatchingGroupTelegramsDrainedInBeltAndSuspenders) {
+  ReadHandler handler(knxd_, sessions_);
+
+  // Non-matching group telegrams (drained & discarded by belt-and-suspenders)
+  knxd_.enqueue_telegram(0x0B04, {0x00, 0x80, 0x01});  // 1/3/4
+  knxd_.enqueue_telegram(0x0C05, {0x00, 0x80, 0x02});  // 1/4/5
+
+  // Cache poll returns the matching address
+  knxd_.set_last_updates_result(0, {0x0A03}, 5);
+  knxd_.set_cached_value(0x0A03, {0x42});
+
+  auto result = handler.handle("a=1/2/3");
+
+  EXPECT_EQ(result.http_status, 200);
+  EXPECT_NE(result.body.find("1/2/3"), std::string::npos);
+  EXPECT_NE(result.body.find("42"), std::string::npos);
+  // Only the subscribed address appears
+  EXPECT_EQ(result.body.find("1/3/4"), std::string::npos);
+}
+
+/// When the cache poll succeeds with a matching address and the belt-and-suspenders
+/// drain also has a matching telegram for the same address, it's deduplicated.
+TEST_F(ReadHandlerTest, BeltAndSuspendersDeduplicatesWithCache) {
+  ReadHandler handler(knxd_, sessions_);
+
+  // Cache has the value and reports it as changed
+  knxd_.set_cached_value(0x0A03, {0x42});
+  knxd_.set_last_updates_result(0, {0x0A03}, 10);
+
+  // Same address also arrives as group telegram (belt-and-suspenders)
+  knxd_.enqueue_telegram(0x0A03, {0x00, 0x80, 0x42});
+
+  auto result = handler.handle("a=1/2/3");
+
+  EXPECT_EQ(result.http_status, 200);
+  // Address appears exactly once
+  size_t first = result.body.find("1/2/3");
+  EXPECT_NE(first, std::string::npos);
+  size_t second = result.body.find("1/2/3", first + 1);
+  EXPECT_EQ(second, std::string::npos);
+  // Position is authoritative (10 from cache poll)
+  EXPECT_NE(result.body.find("\"i\":10"), std::string::npos);
+}
+
+// ============================================================================
+// KNX Semantic Correctness Tests
+//
+// All three KNX rules are satisfied by the simple cache-first design:
+//   Rule 1 (no duplicates): position and data come from the same cache poll
+//   Rule 2 (immediate delivery): knxd responds as soon as a telegram arrives
+//   Rule 3 (authoritative index): new_position always from cache_last_updates_2
+// ============================================================================
+
+/// The i= value in the response always comes from knxd's cache_last_updates_2,
+/// never fabricated or locally inferred.
+TEST_F(ReadHandlerTest, AuthoritativePositionFromCachePoll) {
+  ReadHandler handler(knxd_, sessions_);
+
+  knxd_.set_last_updates_result(0, {0x0A03}, 42);
+  knxd_.set_cached_value(0x0A03, {0x99});
+
+  auto result = handler.handle("a=1/2/3&i=0");
+
+  EXPECT_EQ(result.http_status, 200);
+  EXPECT_NE(result.body.find("\"i\":42"), std::string::npos);
+  // Must not be 0 (no position fabricated)
+  EXPECT_EQ(result.body.find("\"i\":0"), std::string::npos);
+}
+
+/// When no telegrams arrive and the timeout expires, the handler returns
+/// an empty response with the current position from knxd.
+TEST_F(ReadHandlerTest, EmptyResponseWithCurrentPositionOnTimeout) {
+  ReadHandler handler(knxd_, sessions_);
+
+  // No telegrams enqueued, cache returns empty result with position
+  knxd_.set_last_updates_result(0, {}, 100);
+
+  auto result = handler.handle("a=1/2/3&i=0");
+
+  EXPECT_EQ(result.http_status, 200);
+  EXPECT_NE(result.body.find("\"d\":{}"), std::string::npos);
+  EXPECT_NE(result.body.find("\"i\":100"), std::string::npos);
 }

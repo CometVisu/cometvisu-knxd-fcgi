@@ -13,6 +13,11 @@
 // You should have received a copy of the GNU General Public License
 // along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
+/**
+ * @file json_builder.cpp
+ * @brief Implementation of the minimal JSON builder.
+ */
+
 #include "json_builder.h"
 
 namespace cvknxd {

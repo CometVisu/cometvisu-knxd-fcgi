@@ -13,6 +13,15 @@
 // You should have received a copy of the GNU General Public License
 // along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
+/**
+ * @file login_handler.cpp
+ * @brief Implementation of the CometVisu /l (login) endpoint handler.
+ *
+ * Creates a session and returns a JSON response with protocol version,
+ * session ID, and optional configuration block.  The configuration block
+ * includes compile-time version info for diagnostics.
+ */
+
 #include "login_handler.h"
 
 #include <cstdlib>

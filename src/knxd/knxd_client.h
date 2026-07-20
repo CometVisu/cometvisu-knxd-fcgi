@@ -13,6 +13,27 @@
 // You should have received a copy of the GNU General Public License
 // along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
+/**
+ * @file knxd_client.h
+ * @brief knxd Unix socket client — the interface to the KNX bus daemon.
+ *
+ * Communicates with knxd over a Unix domain socket using the eibd client
+ * protocol.  Provides both a virtual interface (KnxdClientInterface) for
+ * test mocking and a real implementation (KnxdClient) using POSIX sockets.
+ *
+ * Design differences from the reference eibread-cgi / eibwrite-cgi:
+ *   - Persistent connections: each worker opens its own knxd connection at
+ *     startup and keeps it open.  The reference opened a new connection per
+ *     request (connect → operate → disconnect), which is simpler but burns
+ *     syscalls and knxd connection slots under load.
+ *   - Separate cache connection: cache operations use a dedicated connection
+ *     to avoid head-of-line blocking from group telegrams.
+ *   - Non-blocking I/O: sockets are set to O_NONBLOCK for efficient poll()
+ *     integration in the long-poll handler.
+ *   - Reconnect resilience: transparently reconnects after knxd restarts,
+ *     with exponential backoff retry.
+ */
+
 #ifndef COMETVISU_KNXD_FCGI_KNXD_CLIENT_H_
 #define COMETVISU_KNXD_FCGI_KNXD_CLIENT_H_
 
@@ -26,69 +47,109 @@
 
 namespace cvknxd {
 
-/// Interface for knxd communication — allows mocking in tests.
+/**
+ * @brief Abstract interface for knxd communication.
+ *
+ * All knxd-dependent code accepts a KnxdClientInterface& so that tests can
+ * inject a mock.  The real implementation is KnxdClient.
+ */
 // NOLINTNEXTLINE(cppcoreguidelines-special-member-functions)
 class KnxdClientInterface {
 public:
   virtual ~KnxdClientInterface() = default;
 
-  /// Connect to knxd socket. Returns true on success.
+  /// @brief Connect to knxd via Unix domain socket.
+  /// @param socket_path Filesystem path to the knxd socket (e.g. "/run/knx").
+  /// @return true on success.
   [[nodiscard]] virtual bool connect(std::string_view socket_path) = 0;
 
-  /// Disconnect from knxd.
+  /// @brief Disconnect from knxd, closing all sockets.
   virtual void disconnect() = 0;
 
-  /// Attempt to reconnect after a disconnect, using the last known socket path
-  /// and group socket settings. Returns true if reconnection and group socket
-  /// re-opening succeeded.
+  /// @brief Attempt reconnection after a disconnect.
+  ///
+  /// Uses the last known socket path and group socket settings.
+  /// Re-opens the group socket after reconnecting.
+  /// @return true if both reconnection and group socket re-opening succeeded.
   [[nodiscard]] virtual bool reconnect() = 0;
 
   /// Check if connected.
   [[nodiscard]] virtual bool is_connected() const = 0;
 
-  /// Open a group socket for listening to group telegrams.
-  /// @param write_only If true, only send, don't receive.
+  /// @brief Open a group socket for sending and receiving group telegrams.
+  ///
+  /// knxd opens a "Group Socket" that delivers APDU_PACKET messages for all
+  /// group telegrams on the bus.  This is separate from a T_Group tunnel
+  /// which is per-address.
+  ///
+  /// @param write_only If true, the socket will only send telegrams
+  ///                   (no incoming APDU_PACKET delivery).
   /// @return true on success.
   [[nodiscard]] virtual bool open_group_socket(bool write_only) = 0;
 
-  /// Send a group telegram (write or read request).
+  /// @brief Send a group telegram (GroupValue_Write, GroupValue_Read, or
+  ///        GroupValue_Response).
+  ///
+  /// Rate-limited internally to 50 ms between writes to prevent flooding
+  /// knxd's IP tunnel.
+  ///
   /// @param group_addr 16-bit EIB group address.
-  /// @param apdu Encoded APDU bytes (including 2-byte APDU header).
-  /// @return true on success.
+  /// @param apdu Encoded APDU bytes including the 2-byte APDU header
+  ///            ([0x00, APCI|value...]).
+  /// @return true on success (data sent to knxd).
   [[nodiscard]] virtual bool send_group_packet(uint16_t group_addr,
                                                const std::vector<uint8_t>& apdu) = 0;
 
-  /// Read a group value from the knxd cache.
+  /// @brief Read a group value from knxd's built-in cache.
+  ///
+  /// Uses a separate cache connection (not the group socket) to avoid
+  /// head-of-line blocking.  Retries once on connection errors.
+  ///
   /// @param group_addr 16-bit EIB group address.
-  /// @param nowait If true, return immediately even if no value cached.
-  /// @return Cached value bytes (APDU data after header), or std::nullopt.
+  /// @param nowait If true, return immediately even if no value is cached
+  ///               (EIB_CACHE_READ_NOWAIT).  If false, knxd may block briefly.
+  /// @return Cached value bytes (APDU payload after header), or std::nullopt
+  ///         if the address is not cached or the operation failed.
   [[nodiscard]] virtual std::optional<std::vector<uint8_t>> cache_read(uint16_t group_addr,
                                                                        bool nowait) = 0;
 
-  /// Query knxd for group addresses that changed since a given position.
-  /// This is the COMET/long-poll primitive — it blocks until updates arrive
-  /// or the timeout expires (like the original EIB_Cache_LastUpdates).
-  /// Uses the EIB_CACHE_LAST_UPDATES_2 protocol message with 32-bit counters.
+  /// @brief Query knxd for group addresses that changed since a given
+  ///        position — the COMET/long-poll primitive.
+  ///
+  /// Blocks until a telegram arrives or the timeout expires, then returns
+  /// all changed addresses with the authoritative new position.  Uses the
+  /// EIB_CACHE_LAST_UPDATES_2 protocol message with 32-bit counters.
+  ///
+  /// This is equivalent to eibread-cgi's cache_last_updates() call, but
+  /// with 32-bit positions to avoid wrap-around on busy installations.
+  ///
   /// @param start The starting position (only updates after this are returned).
-  /// @param timeout_sec How long to wait for updates (seconds, 0 = return immediately).
-  /// @return LastUpdatesResult with changed addresses and new position, or std::nullopt on error.
+  /// @param timeout_sec How long to wait (seconds, 0 = return immediately).
+  /// @return LastUpdatesResult with changed addresses and new position, or
+  ///         std::nullopt on error (connection loss, timeout, etc.).
   [[nodiscard]] virtual std::optional<LastUpdatesResult> cache_last_updates_2(uint32_t start,
                                                                               int timeout_sec) = 0;
 
-  /// Try to receive a group telegram (non-blocking).
-  /// @param out_group_addr Output: source of the telegram.
-  /// @param out_apdu Output: received APDU bytes.
-  /// @return true if a telegram was received.
+  /// @brief Try to receive a group telegram from the group socket
+  ///        (non-blocking).
+  ///
+  /// On a group socket, knxd delivers APDU_PACKET messages for every
+  /// group telegram on the bus.  This method drains one such message
+  /// without blocking.
+  ///
+  /// @param[out] out_group_addr Destination group address of the telegram.
+  /// @param[out] out_apdu Raw APDU bytes.
+  /// @return true if a telegram was available and consumed.
   [[nodiscard]] virtual bool poll_group_telegram(uint16_t& out_group_addr,
                                                  std::vector<uint8_t>& out_apdu) = 0;
 
-  /// Get the underlying file descriptor for poll()/select() integration.
-  /// Returns -1 if not connected.
+  /// @brief Get the underlying socket file descriptor for poll()/select().
+  /// @return The fd, or -1 if not connected.
   ///
-  /// WARNING: The returned fd is only valid while the calling thread holds
-  /// the appropriate lock. After the lock is released, another thread may
-  /// call disconnect() or reconnect(), invalidating the fd. The caller must
-  /// not use the fd after releasing the lock.
+  /// @warning The returned fd is only valid while the calling thread holds
+  ///          the appropriate lock.  After the lock is released, another
+  ///          thread may call disconnect() or reconnect(), invalidating the
+  ///          fd.  Do not use the fd after releasing the lock.
   [[nodiscard]] virtual int get_fd() const = 0;
 
   /// Get the total number of group telegrams received from the knxd bus.
@@ -98,10 +159,13 @@ public:
   /// Set the socket to non-blocking mode.
   virtual void set_nonblocking(bool enable) = 0;
 
-  /// Wait for activity on either the group socket or cache connection.
-  /// Returns which fd has data, or Timeout if the timeout expired.
-  /// This enables the read handler to receive instant write notifications
-  /// via the group socket (APDU_PACKET) while also waiting for cache updates.
+  /// @brief Wait for activity on either the group socket or cache connection.
+  ///
+  /// Enables the read handler to receive instant write notifications via
+  /// the group socket (APDU_PACKET) while also waiting for cache updates.
+  ///
+  /// @param timeout_ms Maximum time to wait in milliseconds.
+  /// @return Which fd has data, or Timeout if the timeout expired.
   enum class WaitResult { Timeout = 0, GroupData = 1, CacheData = 2 };
   [[nodiscard]] virtual WaitResult wait_for_activity(int timeout_ms) = 0;
 };

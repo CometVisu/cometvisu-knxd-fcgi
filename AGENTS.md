@@ -123,10 +123,37 @@ actual file content (e.g., `#pragma once` or `#include`).
    burning zero CPU. Incoming telegrams update the cache via the telegram
    callback and matching requests wake immediately.
 
-5. **No external JSON library**: The JSON responses are simple enough to build
+5. **KNX semantic correctness rules** — these are non-negotiable constraints
+   that every handler implementation MUST satisfy:
+
+   **Rule 1 — No duplicate delivery**: Every KNX telegram must be delivered
+   to the client exactly once.  Duplicate delivery is a correctness bug
+   because KNX telegrams carry semantic meaning beyond their data value:
+   a "toggle" command toggles twice if delivered twice, a "scene trigger"
+   triggers the scene twice, a "step" dimming command steps twice.  The
+   handler must use `already_written` deduplication within a single response
+   AND must never return data with a stale position (`i`) that would cause
+   knxd to re-report the same telegram on the next poll.
+
+   **Rule 2 — Immediate delivery**: Group telegrams (APDU_PACKET) arriving
+   on the group socket carry the actual data and must be processed without
+   delay.  The handler must not wait for a cache round-trip before delivering
+   group-socket data.  The combined poll in `cache_last_updates_2` ensures
+   group data wakes the handler immediately.
+
+   **Rule 3 — Authoritative index**: The `i` value in every response must
+   come from knxd via `cache_last_updates_2` (`new_position`).  The handler
+   must never fabricate, locally infer, or increment the position.  If the
+   authoritative position cannot be obtained (e.g. `cache_last_updates_2`
+   returns nullopt or `new_position <= lastpos`), the handler must retry
+   the position query.  If the position still cannot be confirmed, the
+   handler must NOT deliver data — it must return an empty response and
+   let the next poll (with correct position) deliver the data via cache.
+
+6. **No external JSON library**: The JSON responses are simple enough to build
    with a minimal, purpose-built `JsonBuilder`.
 
-6. **No external HTTP parser**: FastCGI provides parsed `QUERY_STRING` via
+7. **No external HTTP parser**: FastCGI provides parsed `QUERY_STRING` via
    `FCGI_PARAMS`. We parse the query string ourselves with `QueryString`.
 
 ## Knxd Protocol Details

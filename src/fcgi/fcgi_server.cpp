@@ -13,6 +13,21 @@
 // You should have received a copy of the GNU General Public License
 // along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
+/**
+ * @file fcgi_server.cpp
+ * @brief FastCGI server implementation — accept loop, request parsing, response writing.
+ *
+ * The two-mode architecture (spawn-fcgi vs. direct socket) exists because the
+ * reference eibread-cgi / eibwrite-cgi backends used spawn-fcgi exclusively.
+ * We support that mode for compatibility and direct-socket mode for standalone
+ * operation with a fork-based worker pool.
+ *
+ * In direct socket mode the key difference from the reference implementation
+ * is that we use FCGX_Accept_r() on our own socket fd instead of FCGI_Accept()
+ * on stdin.  The FCGX API is lower-level but gives us control over the listen
+ * socket — essential for sharing it across forked children.
+ */
+
 #include "fcgi_server.h"
 
 #include <fcgi_stdio.h>
@@ -43,11 +58,6 @@ FcgiServer::FcgiServer() = default;
 
 FcgiServer::~FcgiServer() {
   shutdown();
-  for (auto& t : workers_) {
-    if (t.joinable()) {
-      t.join();
-    }
-  }
 }
 
 void FcgiServer::set_handler(RequestHandler handler) {
@@ -98,6 +108,11 @@ int FcgiServer::run() {
     // ---- Direct socket mode ----
     // Accept FastCGI connections on our own Unix/TCP socket.
     // This is used when running standalone (e.g. via FCGI_SOCKET env var).
+    //
+    // The reference eibread-cgi / eibwrite-cgi backends used only the
+    // spawn-fcgi path below.  Direct socket mode is an extension that
+    // enables the fork-based worker pool — each child inherits listen_fd_
+    // and calls FCGX_Accept_r() independently; the kernel serializes.
 
     // FCGX_Init() must be called before FCGX_Accept_r() — it sets the
     // libInitialized flag and performs platform-specific setup (OS_LibInit).
@@ -114,8 +129,9 @@ int FcgiServer::run() {
 
     while (FCGX_Accept_r(&request_) >= 0) {
       // Read request parameters directly from the FCGI envp array.
-      // This avoids setting the global environ pointer, making it safe
-      // for use in both single-threaded and multithreaded contexts.
+      // The reference eibread-cgi used getenv() which reads from the
+      // global `environ` pointer.  We pass envp directly instead, which
+      // is thread-safe and avoids the need to set `environ = request_.envp`.
       const FcgiRequest req = read_request(request_.envp);
 
       // ---- General concurrency limiting ----
@@ -187,7 +203,9 @@ int FcgiServer::run() {
   } else {
     // ---- Spawn-fcgi mode ----
     // Accept FastCGI connections from stdin/stdout as set up by spawn-fcgi
-    // or the web server.
+    // or the web server.  This is the mode used by the reference
+    // eibread-cgi / eibwrite-cgi backends — it uses the simpler FCGI_stdio
+    // API where the web server multiplexes requests onto our stdin.
     while (FCGI_Accept() >= 0) {
       const FcgiRequest req = read_request();
 
@@ -208,19 +226,28 @@ void FcgiServer::shutdown() {
   shutdown_requested_.store(true, std::memory_order_relaxed);
 
   if (listen_fd_ >= 0) {
+    // Three-step shutdown to reliably unblock workers stuck in accept():
+    //
     // Step 1: shutdown(SHUT_RDWR) causes any worker blocked in accept()
-    // on this fd to fail with EINVAL. This is reliable on Linux, unlike
-    // close() which may leave accept() blocked indefinitely.
+    // on this fd to fail with EINVAL.  This is reliable on Linux, unlike
+    // close() which may leave accept() blocked indefinitely because the
+    // kernel keeps the fd alive while children hold references.
     ::shutdown(listen_fd_, SHUT_RDWR);
 
-    // Step 2: Connect to unblock any workers that didn't respond to
-    // shutdown(). Each accepted connection gets an immediate client EOF,
-    // causing FCGX_Accept_r to return -1 and the worker to exit.
+    // Step 2: Self-connect to unblock any workers that didn't respond to
+    // shutdown().  Each accepted connection gets an immediate EOF (we
+    // close our end right away), causing FCGX_Accept_r() to return -1
+    // and the worker to exit its loop naturally.
+    //
+    // Connecting 64 times is a belt-and-suspenders approach — it covers
+    // the pathological case where multiple workers were stuck in accept()
+    // simultaneously and the kernel delivered the shutdown signal to only
+    // one of them.
     struct sockaddr_un addr {};
     socklen_t addr_len = sizeof(addr);
     // NOLINTNEXTLINE(cppcoreguidelines-pro-type-reinterpret-cast)
     if (::getsockname(listen_fd_, reinterpret_cast<struct sockaddr*>(&addr), &addr_len) == 0) {
-      const int wakeups = (num_workers_ > 0) ? num_workers_ : 64;
+      const int wakeups = 64;
       for (int i = 0; i < wakeups; ++i) {
         const int fd = ::socket(AF_UNIX, SOCK_STREAM | SOCK_NONBLOCK, 0);
         if (fd < 0) {
@@ -238,98 +265,10 @@ void FcgiServer::shutdown() {
       }
     }
 
-    // Step 3: Close the fd. By now all workers should have exited.
+    // Step 3: Close the fd.  By now all workers should have exited.
     ::close(listen_fd_);
     listen_fd_ = -1;
   }
-}
-
-int FcgiServer::run_multithreaded(int num_threads) {
-  if (!handler_) {
-    std::cerr << "[ERROR] No request handler set\n";
-    return 1;
-  }
-
-  if (listen_fd_ < 0) {
-    std::cerr << "[ERROR] run_multithreaded() requires a listening socket (call listen() first)\n";
-    return 1;
-  }
-
-  num_threads = std::max(num_threads, 1);
-
-  // FCGX_Init() must be called once before any FCGX_Accept_r().
-  // It sets the libInitialized flag and performs platform-specific setup.
-  if (FCGX_Init() != 0) {
-    std::cerr << "[ERROR] FCGX_Init failed\n";
-    return 1;
-  }
-
-  shutdown_requested_.store(false, std::memory_order_relaxed);
-  num_workers_ = num_threads;
-
-  // Spawn worker threads. Each thread creates its own FCGX_Request and
-  // calls FCGX_Accept_r() on the shared listen socket. The OS serializes
-  // accept() calls across threads — when one thread accepts a connection,
-  // the next thread waiting on accept() gets the next connection.
-  for (int i = 0; i < num_threads; ++i) {
-    workers_.emplace_back([this]() {
-      FCGX_Request request;
-      if (FCGX_InitRequest(&request, listen_fd_, 0) != 0) {
-        std::cerr << "[ERROR] FCGX_InitRequest failed in worker thread\n";
-        return;
-      }
-
-      while (!shutdown_requested_.load(std::memory_order_relaxed)) {
-        const int rc = FCGX_Accept_r(&request);
-        if (rc < 0) {
-          // Accept failed — either shutdown (listen_fd_ closed) or error.
-          break;
-        }
-
-        // Read request parameters directly from the FCGI envp array.
-        // This avoids setting the global environ pointer, which would
-        // race with other worker threads doing the same concurrently.
-        const FcgiRequest req = read_request(request.envp);
-        DebugLog::http_request(req.request_method, req.request_uri);
-
-        const FcgiResponse resp = handler_(req);
-        DebugLog::http_response(resp.status_code, resp.body);
-
-        // Serialize FCGI output calls with a mutex.  libfcgi's internal
-        // stream and connection state is not fully thread-safe, so
-        // concurrent FCGX_PutStr / FCGX_Finish_r calls from different
-        // worker threads can corrupt shared buffers.
-        {
-          const std::scoped_lock lock(fcgi_mutex_);
-          write_response_direct(request, resp);
-          FCGX_Finish_r(&request);
-        }
-      }
-    });
-  }
-
-  // Wait for all worker threads to complete (triggered by shutdown()).
-  for (auto& t : workers_) {
-    t.join();
-  }
-  workers_.clear();
-
-  return 0;
-}
-
-void FcgiServer::write_response_direct(FCGX_Request& request, const FcgiResponse& response) {
-  // Build the full HTTP response as a single string.
-  std::string output;
-  output.reserve(256 + response.body.size());
-
-  output += "Status: " + std::to_string(response.status_code) + "\r\n";
-  output += "Content-Type: " + response.content_type + "; charset=utf-8\r\n";
-  output += "Content-Length: " + std::to_string(response.body.size()) + "\r\n";
-  output += "\r\n";
-  output += response.body;
-
-  // Write to the FCGX request output stream (direct socket mode).
-  FCGX_PutStr(output.data(), static_cast<int>(output.size()), request.out);
 }
 
 FcgiRequest FcgiServer::read_request() {

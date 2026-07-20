@@ -13,6 +13,23 @@
 // You should have received a copy of the GNU General Public License
 // along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
+/**
+ * @file read_handler.cpp
+ * @brief Implementation of the CometVisu /r (read) endpoint handler.
+ *
+ * The handler mirrors the logic of the reference eibread-cgi.c but with
+ * several modernizations:
+ *   - cache_last_updates_2 (32-bit) instead of cache_last_updates (16-bit)
+ *   - No local cache — delegates to knxd's built-in cache
+ *   - Does not send GroupValueRead on cache miss (avoids tunnel flooding)
+ *   - Deduplication via already_written set
+ *   - Belt-and-suspenders group telegram drain after cache poll
+ *
+ * The poll loop is the heart of COMET long-poll.  It uses cache_last_updates_2
+ * to block until a telegram arrives or the timeout expires.  This is zero-CPU
+ * because the kernel puts the process to sleep on the knxd socket fd.
+ */
+
 #include "read_handler.h"
 
 #include <charconv>
@@ -38,6 +55,9 @@ ReadHandler::ReadHandler(KnxdClientInterface& knxd, SessionStore& sessions,
     : knxd_(knxd), sessions_(sessions), longpoll_timeout_sec_(longpoll_timeout_sec) {}
 
 std::optional<int> ReadHandler::parse_timeout(std::string_view t_str) {
+  // Parses the `t` (timeout) and `i` (index/position) parameters.
+  // Both are simple non-negative integers in the CometVisu protocol.
+  // Rejects trailing garbage (e.g. "5abc" is invalid).
   if (t_str.empty()) {
     return std::nullopt;
   }
@@ -68,6 +88,9 @@ ReadResult ReadHandler::handle(std::string_view query_string) {
   }
 
   // ---- Session validation ----
+  // Sessions are optional for reads (anonymous access), but if provided,
+  // they must be valid.  The reference eibread-cgi did not have sessions;
+  // this is an extension for authenticated CometVisu installations.
   if (auto s_opt = params.get("s")) {
     if (!sessions_.is_valid(*s_opt)) {
       result.http_status = 401;
@@ -77,9 +100,10 @@ ReadResult ReadHandler::handle(std::string_view query_string) {
   }
 
   // ---- Parse timeout (t parameter) ----
-  // Original semantics: t is a simple timeout in seconds for the poll loop.
-  // If t is not specified, use the default longpoll timeout.
-  // If t == 0: force initial read (lastpos=0) and set timeout to 1 second.
+  // Semantics from the reference eibread-cgi:
+  //   t is the timeout in seconds for the poll loop.
+  //   If t is not specified, use the configured default (LONGPOLL_TIMEOUT_SEC).
+  //   If t == 0: force an initial read (lastpos=0) with a 1-second timeout.
   int timeout_sec = longpoll_timeout_sec_;
   if (auto t_opt = params.get("t")) {
     const auto parsed = parse_timeout(*t_opt);
@@ -92,8 +116,12 @@ ReadResult ReadHandler::handle(std::string_view query_string) {
   }
 
   // ---- Parse position (i parameter) ----
-  // i is the last known position (like "lastpos" in the original).
-  // 0 means the client has no prior state.
+  // `i` is the last known position from knxd, equivalent to `lastpos` in
+  // eibread-cgi.  0 means the client has no prior state — we do an initial
+  // cache read for all requested addresses.
+  //
+  // Invalid `i` values are silently ignored (treated as 0), matching the
+  // reference behaviour.
   uint32_t lastpos = 0;
   if (auto i_opt = params.get("i")) {
     const auto parsed = parse_timeout(*i_opt);  // reuse int parser
@@ -142,14 +170,15 @@ ReadResult ReadHandler::handle(std::string_view query_string) {
 
   // ---- Initial read (if lastpos == 0) ----
   // Reads ALL requested addresses from the knxd cache synchronously.
-  // This matches the original: for (i = 0; i < UINT16; i++) { if (subscribed) { ... } }
-  // Addresses NOT found in cache are simply omitted from the response —
-  // the poll loop below will catch them when the device sends its value,
-  // or when our own write triggers an APDU_PACKET on the group socket.
-  // We intentionally do NOT send GroupValueRead telegrams for cache misses:
-  // doing so would flood knxd's IP tunnel with read requests when many
-  // workers process initial reads simultaneously, causing knxd's tunnel
-  // retry mechanism to exhaust and fatally disconnect ("Link down, terminating").
+  // This matches eibread-cgi's initial loop: for each subscribed address,
+  // read the cached value.  Addresses not in cache are silently omitted —
+  // the poll loop below will catch them when a telegram arrives.
+  //
+  // We intentionally do NOT send GroupValueRead for cache misses.
+  // eibread-cgi did this (sending a read request to trigger a response),
+  // but with the fork-based worker pool, multiple workers doing
+  // simultaneous initial reads would flood knxd's IP tunnel with read
+  // requests, causing retry exhaustion and fatal "Link down, terminating".
   if (lastpos == 0) {
     for (auto addr : eib_addrs) {
       const auto data = knxd_.cache_read(addr, true);  // nowait (cache_read filters out Read APDUs)
@@ -162,6 +191,14 @@ ReadResult ReadHandler::handle(std::string_view query_string) {
   }
 
   // ---- Poll loop (COMET/long-poll) ----
+  // This is the equivalent of eibread-cgi's cache_last_updates loop.
+  // We call cache_last_updates_2 which blocks until a telegram arrives
+  // or the timeout expires, then returns all changed addresses with the
+  // authoritative new_position.
+  //
+  // The loop continues while: (a) nothing was written yet OR (b) the
+  // position is still 0 (initial read didn't find anything), AND (c)
+  // there is time remaining.
   auto tstart = std::chrono::steady_clock::now();
   int timeout_retries = 0;
   static constexpr int kMaxTimeoutRetries = 3;
@@ -176,46 +213,21 @@ ReadResult ReadHandler::handle(std::string_view query_string) {
       break;
     }
 
-    // ---- Step 1: Drain group telegrams BEFORE the cache poll. ----
-    // Own writes arrive as APDU_PACKET on the group socket.  Draining them
-    // first ensures cache_last_updates_2 receives knxd's authoritative
-    // position (which may have advanced due to these writes) instead of
-    // being interrupted and returning nullopt.
-    {
-      uint16_t telegram_addr = 0;
-      std::vector<uint8_t> telegram_apdu;
-      while (knxd_.poll_group_telegram(telegram_addr, telegram_apdu)) {
-        if (eib_addrs.contains(telegram_addr) && !already_written.contains(telegram_addr)) {
-          ApduType apdu_type{};
-          std::vector<uint8_t> value_data;
-          if (parse_apdu(telegram_apdu, apdu_type, value_data) && apdu_type != ApduType::Read) {
-            json.add_string(addr_key(telegram_addr),
-                            hex_encode(value_data.data(), value_data.size()));
-            already_written.insert(telegram_addr);
-            written = true;
-          }
-        }
-      }
-    }
-
-    // ---- Step 2: Poll knxd's cache for position updates. ----
-    // This returns knxd's AUTHORITATIVE position — we never fabricate i=.
+    // ---- Poll knxd's cache for position updates. ----
+    // cache_last_updates_2 blocks until a telegram arrives or the
+    // timeout expires, then returns ALL changed addresses with the
+    // authoritative position (new_position).  This single call
+    // satisfies all three KNX rules:
+    //   Rule 1 (no duplicates): position comes from the same response
+    //           as the changed address list, so the client's next
+    //           request won't re-fetch the same data.
+    //   Rule 2 (immediate delivery): knxd responds as soon as a
+    //           telegram arrives — zero-CPU polling.
+    //   Rule 3 (authoritative index): new_position comes from knxd,
+    //           never fabricated locally.
     const auto updates = knxd_.cache_last_updates_2(lastpos, remaining);
     if (!updates.has_value()) {
-      if (written) {
-        // Data was found (initial read or group drain) but the cache poll
-        // failed. Query knxd's position one more time before returning
-        // so the i= value is authoritative.
-        if (!knxd_.is_connected()) {
-          (void)knxd_.reconnect();
-        }
-        auto pos = knxd_.cache_last_updates_2(lastpos, 0);
-        if (pos.has_value()) {
-          lastpos = pos->new_position;
-        }
-        break;
-      }
-
+      // Cache poll failed (connection loss, timeout, etc.)
       if (!knxd_.is_connected()) {
         const auto now = std::chrono::steady_clock::now();
         const auto elapsed_sec =
@@ -226,7 +238,7 @@ ReadResult ReadHandler::handle(std::string_view query_string) {
           continue;
         }
       }
-      // Transient failure with retries remaining — brief sleep and retry.
+      // Transient failure — brief sleep and retry.
       if (remaining > 0 && timeout_retries < kMaxTimeoutRetries) {
         timeout_retries++;
         std::this_thread::sleep_for(std::chrono::milliseconds(100));
@@ -239,7 +251,7 @@ ReadResult ReadHandler::handle(std::string_view query_string) {
     timeout_retries = 0;
     lastpos = updates->new_position;
 
-    // ---- Step 3: Process changed addresses from knxd's cache. ----
+    // ---- Process changed addresses from knxd's cache. ----
     for (const auto changed_addr : updates->changed_addresses) {
       if (!eib_addrs.contains(changed_addr)) {
         continue;
@@ -255,8 +267,8 @@ ReadResult ReadHandler::handle(std::string_view query_string) {
       }
     }
 
-    // ---- Step 4: Belt-and-suspenders drain (group telegrams that arrived
-    // during the cache poll, after knxd reported its position). ----
+    // ---- Belt-and-suspenders: drain group telegrams that arrived
+    // during the cache poll, after knxd reported its position. ----
     {
       uint16_t telegram_addr = 0;
       std::vector<uint8_t> telegram_apdu;

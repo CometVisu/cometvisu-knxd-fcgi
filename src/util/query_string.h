@@ -13,6 +13,18 @@
 // You should have received a copy of the GNU General Public License
 // along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
+/**
+ * @file query_string.h
+ * @brief FastCGI query string parser with multi-value support.
+ *
+ * Parses URL-encoded query strings (application/x-www-form-urlencoded) into
+ * a key→values map.  Supports multiple values for the same key (the `a`
+ * parameter commonly appears multiple times in /r and /w requests).
+ *
+ * Enforces limits on unique keys, values per key, and total pairs to
+ * prevent memory exhaustion from maliciously crafted query strings.
+ */
+
 #pragma once
 
 #include <optional>
@@ -23,8 +35,13 @@
 
 namespace cvknxd {
 
-/// Transparent hash and equality for heterogeneous lookup with string_view
-/// in unordered_map<string, ...> containers (C++20).
+/**
+ * @brief Transparent hash for heterogeneous lookup with string_view in
+ *        unordered_map<string, ...> containers (C++20).
+ *
+ * The `is_transparent` tag enables find() with string_view keys without
+ * constructing a temporary std::string.
+ */
 struct StringHash {
   using is_transparent = void;  // enables heterogeneous lookup
 
@@ -39,13 +56,16 @@ struct StringHash {
 struct StringEqual {
   using is_transparent = void;
 
-  [[nodiscard]] bool operator()(std::string_view a, std::string_view b) const {
-    return a == b;
-  }
+  [[nodiscard]] bool operator()(std::string_view a, std::string_view b) const { return a == b; }
 };
 
-/// Parsed query string from an HTTP/FCGI request.
-/// Supports multiple values for the same key (multi-valued parameters).
+/**
+ * @brief Parsed query string from an HTTP/FCGI request.
+ *
+ * Supports multiple values for the same key (multi-valued parameters).
+ * Uses heterogeneous lookup so get("a") works with string_view without
+ * allocating a std::string.
+ */
 class QueryString {
 public:
   /// Parse a raw query string (e.g. "a=1/2/3&t=5&a=4/5/6").

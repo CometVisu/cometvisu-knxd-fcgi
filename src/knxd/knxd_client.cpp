@@ -13,6 +13,27 @@
 // You should have received a copy of the GNU General Public License
 // along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
+/**
+ * @file knxd_client.cpp
+ * @brief Real implementation of KnxdClientInterface using POSIX Unix sockets.
+ *
+ * Manages two connections to knxd:
+ *   - The **main connection** (fd): a group socket for sending group packets
+ *     and receiving APDU_PACKET telegrams.
+ *   - The **cache connection** (cache_fd_): a plain socket for cache_read()
+ *     and cache_last_updates_2() operations, avoiding head-of-line blocking.
+ *
+ * The reference eibread-cgi / eibwrite-cgi used a single connection per
+ * request.  We use persistent connections with automatic reconnect on
+ * failure, which reduces syscall overhead and connection slot consumption
+ * under load.
+ *
+ * Thread safety: three recursive_mutex instances serialize access to the
+ * main connection (mutex), cache connection (cache_mutex), and pre-counted
+ * telegram queue (telegram_queue_mutex).  Lock ordering is always:
+ * mutex → cache_mutex → telegram_queue_mutex.
+ */
+
 #include "knxd_client.h"
 
 #include <fcntl.h>
@@ -239,8 +260,16 @@ bool KnxdClient::reconnect() {
 
 namespace {
 
-/// Write all bytes to socket. Handles EAGAIN in non-blocking mode by polling.
-/// Returns true if all bytes were written.
+/// @brief Write all bytes to a socket, handling EAGAIN in non-blocking mode.
+///
+/// In non-blocking mode, ::write() may return EAGAIN when the kernel send
+/// buffer is full.  This function polls for writability and retries, with a
+/// 5-second timeout to avoid hanging indefinitely.
+///
+/// @param fd Socket file descriptor.
+/// @param data Pointer to the data to write.
+/// @param len Number of bytes to write.
+/// @return true if all bytes were written successfully.
 bool write_all(int fd, const uint8_t* data, size_t len) {
   size_t offset = 0;
   while (offset < len) {
@@ -268,9 +297,12 @@ bool write_all(int fd, const uint8_t* data, size_t len) {
   return true;
 }
 
-/// Shrink a vector if it has significant excess capacity (more than 4x the used
-/// size or more than 64 KB of waste).  Prevents unbounded memory retention on
-/// long-running embedded systems after transient traffic spikes.
+/// @brief Shrink a vector if it has significant excess capacity.
+///
+/// Triggered when capacity exceeds 4× the used size OR the waste exceeds
+/// 64 KB.  Prevents unbounded memory retention on long-running embedded
+/// systems after transient traffic spikes — for example, a burst of 100
+/// telegrams could leave a 400 KB buffer allocated indefinitely.
 inline void shrink_if_large(std::vector<uint8_t>& buf) {
   // NOLINTNEXTLINE(bugprone-implicit-widening-of-multiplication-result)
   if (buf.capacity() > static_cast<size_t>(buf.size()) * 4 ||
@@ -279,14 +311,22 @@ inline void shrink_if_large(std::vector<uint8_t>& buf) {
   }
 }
 
-/// Read a complete eibd message (length-prefixed) from the socket.
-/// Uses an internal buffer to handle partial reads in non-blocking mode.
-/// This is an iterative (non-recursive) implementation to avoid stack overflow
-/// on busy KNX buses with many partial reads.
+/// @brief Read a complete eibd message (length-prefixed) from a socket.
+///
+/// Uses an internal accumulation buffer to handle partial reads in
+/// non-blocking mode.  The eibd protocol prefixes each message with a
+/// 2-byte big-endian length, so we know exactly how many bytes to expect.
+///
+/// This is an iterative (non-recursive) implementation to avoid stack
+/// overflow on busy KNX buses where many partial reads could recurse
+/// deeply.
+///
 /// @param fd Socket file descriptor.
 /// @param buffer Accumulated read buffer (consumed as messages are parsed).
-///              Enforced maximum size of kMaxReadBufferSize to prevent memory leaks.
-/// @return Complete message bytes (including 2-byte length header), or std::nullopt.
+///              Enforced maximum size of kMaxReadBufferSize to prevent
+///              memory leaks from unconsumed telegrams.
+/// @return Complete message bytes including the 2-byte length header, or
+///         std::nullopt if no complete message is available yet.
 std::optional<std::vector<uint8_t>> read_message(int fd, std::vector<uint8_t>& buffer) {
   while (true) {
     // Try to extract a complete message from the buffer (pure function, no I/O)
@@ -855,11 +895,7 @@ std::optional<LastUpdatesResult> KnxdClient::cache_last_updates_2(uint32_t start
         continue;  // Unknown message on cache connection — skip
       }
 
-      // Need more data — poll ONLY the cache connection.
-      // The group socket is drained separately by the read handler
-      // before calling cache_last_updates_2, so we don't need to
-      // poll it here.  This ensures the returned position always
-      // comes from knxd (authoritative), never fabricated.
+      // Need more data — poll the cache connection.
       auto remaining = std::chrono::duration_cast<std::chrono::milliseconds>(
                            deadline - std::chrono::steady_clock::now())
                            .count();
@@ -932,30 +968,59 @@ std::optional<LastUpdatesResult> KnxdClient::cache_last_updates_2(uint32_t start
 }
 
 KnxdClient::WaitResult KnxdClient::wait_for_activity(int timeout_ms) {
-  // This method is now a simple combined poll without requiring an active
-  // cache request.  The read handler uses it to check for pending group
-  // telegrams BEFORE entering the cache poll.  For cache notifications,
-  // cache_last_updates_2_with_group_poll() handles the combined wait.
+  // Combined poll on both the group socket (for APDU_PACKET telegrams) and
+  // the cache connection (for cache_last_updates_2 responses).  The read
+  // handler uses this to detect group telegrams immediately without waiting
+  // for a cache round-trip, which is critical on busy KNX buses where many
+  // non-matching telegrams can otherwise multiply the latency.
+
   int group_fd = -1;
+  int cache_fd = -1;
 
   {
     std::lock_guard<std::recursive_mutex> main_lock(impl_->mutex);
     group_fd = impl_->fd;
   }
+  {
+    std::lock_guard<std::recursive_mutex> cache_lock(impl_->cache_mutex);
+    cache_fd = impl_->cache_fd_;
+  }
 
-  if (group_fd < 0) {
+  if (group_fd < 0 && cache_fd < 0) {
     return WaitResult::Timeout;
   }
 
-  struct pollfd pfd = {};
-  pfd.fd = group_fd;
-  pfd.events = POLLIN;
+  std::array<struct pollfd, 2> pfds = {};
+  size_t nfds = 0;
 
-  int ret = ::poll(&pfd, 1, timeout_ms);
+  if (group_fd >= 0) {
+    pfds[nfds].fd = group_fd;
+    pfds[nfds].events = POLLIN;
+    nfds++;
+  }
+  if (cache_fd >= 0) {
+    pfds[nfds].fd = cache_fd;
+    pfds[nfds].events = POLLIN;
+    nfds++;
+  }
+
+  int ret = ::poll(pfds.data(), static_cast<nfds_t>(nfds), timeout_ms);
   if (ret <= 0) {
     return WaitResult::Timeout;
   }
-  return WaitResult::GroupData;
+
+  // Check group socket first — group telegrams take priority because they
+  // carry the actual data and are faster to process (non-blocking drain).
+  if (group_fd >= 0 && (pfds[0].revents & POLLIN) != 0) {
+    return WaitResult::GroupData;
+  }
+  // cache_fd is at index 1 if group_fd is present, otherwise at index 0.
+  size_t cache_idx = (group_fd >= 0) ? 1 : 0;
+  if (cache_fd >= 0 && (pfds[cache_idx].revents & POLLIN) != 0) {
+    return WaitResult::CacheData;
+  }
+
+  return WaitResult::Timeout;
 }
 
 }  // namespace cvknxd
