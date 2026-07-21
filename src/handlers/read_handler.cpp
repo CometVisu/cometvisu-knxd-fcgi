@@ -227,7 +227,48 @@ ReadResult ReadHandler::handle(std::string_view query_string) {
     //           never fabricated locally.
     const auto updates = knxd_.cache_last_updates_2(lastpos, remaining);
     if (!updates.has_value()) {
-      // Cache poll failed (connection loss, timeout, etc.)
+      // Cache poll returned nullopt.  Two possibilities:
+      //  1. The combined poll detected data on the group socket (e.g. a
+      //     /w write echo) — drain group telegrams and deliver immediately.
+      //  2. Connection loss or real failure — reconnect or retry.
+      //
+      // Drain group telegrams first: this catches write echoes that arrived
+      // while cache_last_updates_2 was waiting.  The knxd cache might not
+      // be updated yet for locally-originated writes, but the group socket
+      // echo (APDU_PACKET) is always delivered.
+      bool group_drain_delivered = false;
+      {
+        uint16_t telegram_addr = 0;
+        std::vector<uint8_t> telegram_apdu;
+        while (knxd_.poll_group_telegram(telegram_addr, telegram_apdu)) {
+          if (eib_addrs.contains(telegram_addr) && !already_written.contains(telegram_addr)) {
+            ApduType apdu_type{};
+            std::vector<uint8_t> value_data;
+            if (parse_apdu(telegram_apdu, apdu_type, value_data) && apdu_type != ApduType::Read) {
+              json.add_string(addr_key(telegram_addr),
+                              hex_encode(value_data.data(), value_data.size()));
+              already_written.insert(telegram_addr);
+              written = true;
+              group_drain_delivered = true;
+            }
+          }
+        }
+      }
+      if (group_drain_delivered) {
+        // Data delivered from group drain.  Try to get the authoritative
+        // position from knxd's cache before returning.  Use timeout=0
+        // (non-blocking) since we already have the data and just need the
+        // position for the i= field.  If knxd hasn't updated the cache yet,
+        // we use the last known position — the next /r poll with this i
+        // will re-deliver if needed (belt-and-suspenders).
+        const auto pos_update = knxd_.cache_last_updates_2(lastpos, 0);
+        if (pos_update && pos_update->new_position > lastpos) {
+          lastpos = pos_update->new_position;
+        }
+        break;
+      }
+
+      // No group data either — check if the connection is still alive.
       if (!knxd_.is_connected()) {
         const auto now = std::chrono::steady_clock::now();
         const auto elapsed_sec =

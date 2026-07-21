@@ -829,6 +829,110 @@ TEST_F(ReadHandlerTest, IndexParamResponseIsNewPositionNotTelegramCount) {
   EXPECT_EQ(result.body.find("\"i\":999"), std::string::npos);
 }
 
+// ============================================================================
+// Write-wakes-read: When a /w writes a value, any blocked /r looking for
+// that address should receive the value immediately via the group socket
+// echo, without waiting for a cache round-trip.
+//
+// Scenario: A read is blocked in cache_last_updates_2.  A write sends a
+// group telegram which knxd echoes as APDU_PACKET on the group socket.
+// cache_last_updates_2 detects the group socket data (combined poll),
+// returns nullopt, and the handler drains the telegram and delivers it.
+// The authoritative i still comes from a subsequent cache_last_updates_2.
+// ============================================================================
+
+TEST_F(ReadHandlerTest, WriteWakesBlockedReadViaGroupSocketEcho) {
+  // Simulates: /r is long-polling (i=42, no initial read needed).
+  // A /w happens, enqueuing a group telegram.  cache_last_updates_2 detects
+  // the group socket data in its combined poll and returns nullopt.  The
+  // handler drains the telegram, finds the matching address, then calls
+  // cache_last_updates_2 again for the authoritative position.
+  ReadHandler handler(knxd_, sessions_);
+
+  // Step 1: cache_last_updates_2 returns nullopt (simulating combined poll
+  // detecting group socket data from a write).
+  knxd_.set_cache_last_updates_nullopt_count(1);
+
+  // Step 2: Group telegram for matching address is enqueued (the write echo).
+  // APDU: [0x00, 0x80, 0x42] = A_GroupValue_Write, value=0x42
+  knxd_.enqueue_telegram(0x0A03, {0x00, 0x80, 0x42});
+
+  // Step 3: On retry, cache_last_updates_2 returns the authoritative position.
+  // The changed address includes 0x0A03, and the cache has the value.
+  knxd_.set_last_updates_result(42, {0x0A03}, 43);
+  knxd_.set_cached_value(0x0A03, {0x42});
+
+  // Long-poll with i=42 (non-zero, so no initial read).
+  // t=5 limits the timeout to prevent test from running too long.
+  auto result = handler.handle("a=1/2/3&i=42&t=5");
+
+  EXPECT_EQ(result.http_status, 200);
+  // The written value must be delivered
+  EXPECT_NE(result.body.find("1/2/3"), std::string::npos) << "Expected address 1/2/3 in response";
+  EXPECT_NE(result.body.find("42"), std::string::npos) << "Expected value 42 in response";
+  // i must come from knxd's authoritative position (43), not fabricated
+  EXPECT_NE(result.body.find("\"i\":43"), std::string::npos)
+      << "Expected authoritative i=43 from cache_last_updates_2";
+}
+
+TEST_F(ReadHandlerTest, WriteWakesBlockedReadGroupDrainFindsMatch) {
+  // Simulates: cache_last_updates_2 detects group data and returns nullopt.
+  // The handler drains the group telegram directly (not via cache) and
+  // delivers the value immediately.  The i still comes from knxd.
+  ReadHandler handler(knxd_, sessions_);
+
+  // cache_last_updates_2 returns nullopt (group data detected)
+  knxd_.set_cache_last_updates_nullopt_count(1);
+
+  // Matching group telegram (write echo) is available
+  knxd_.enqueue_telegram(0x0A03, {0x00, 0x80, 0x42});
+
+  // On retry, cache_last_updates_2 returns empty (no cache updates yet)
+  // but with position advanced to 43
+  knxd_.set_last_updates_result(42, {}, 43);
+
+  // Long-poll with i=42
+  auto result = handler.handle("a=1/2/3&i=42&t=5");
+
+  EXPECT_EQ(result.http_status, 200);
+  // The group telegram should be drained and the value delivered
+  EXPECT_NE(result.body.find("1/2/3"), std::string::npos)
+      << "Expected address 1/2/3 from group telegram drain";
+  EXPECT_NE(result.body.find("42"), std::string::npos)
+      << "Expected value 42 from group telegram drain";
+  // i comes from the retried cache_last_updates_2 (43)
+  EXPECT_NE(result.body.find("\"i\":43"), std::string::npos)
+      << "Expected authoritative i=43 from knxd";
+}
+
+TEST_F(ReadHandlerTest, WriteWakesBlockedReadNonMatchingTelegramIgnored) {
+  // cache_last_updates_2 detects group data for an address we're NOT
+  // subscribed to.  The handler drains it and retries — it should not
+  // deliver the non-matching address.
+  ReadHandler handler(knxd_, sessions_);
+
+  // cache_last_updates_2 returns nullopt
+  knxd_.set_cache_last_updates_nullopt_count(1);
+
+  // Non-matching group telegram (1/3/4 = 0x0B04, we're asking for 1/2/3)
+  knxd_.enqueue_telegram(0x0B04, {0x00, 0x80, 0x0C, 0x6F});
+
+  // On retry, cache_last_updates_2 has a matching address
+  knxd_.set_last_updates_result(42, {0x0A03}, 43);
+  knxd_.set_cached_value(0x0A03, {0x42});
+
+  auto result = handler.handle("a=1/2/3&i=42&t=5");
+
+  EXPECT_EQ(result.http_status, 200);
+  // Non-matching address must NOT appear
+  EXPECT_EQ(result.body.find("1/3/4"), std::string::npos)
+      << "Non-matching address 1/3/4 should not appear";
+  // Matching address should be delivered (via cache on retry)
+  EXPECT_NE(result.body.find("1/2/3"), std::string::npos);
+  EXPECT_NE(result.body.find("42"), std::string::npos);
+  EXPECT_NE(result.body.find("\"i\":43"), std::string::npos);
+}
+
 // ---- Multi-address response (issue #6) ----
 
 TEST_F(ReadHandlerTest, MultipleChangedAddressesInOneResponse) {
