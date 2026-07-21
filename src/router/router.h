@@ -33,6 +33,7 @@
 #include "handlers/login_handler.h"
 #include "handlers/read_handler.h"
 #include "handlers/write_handler.h"
+#include "state/group_cache.h"
 
 namespace cvknxd {
 
@@ -44,8 +45,8 @@ namespace cvknxd {
  */
 class Router {
 public:
-  Router(KnxdClientInterface& knxd, SessionStore& sessions, int longpoll_timeout_sec = 300,
-         std::string base_url = "");
+  Router(KnxdClientInterface& knxd, GroupCache& cache, SessionStore& sessions,
+         int longpoll_timeout_sec = 300, std::string base_url = "");
 
   /// @brief Dispatch a request and return the response.
   /// @param request The parsed FCGI request.

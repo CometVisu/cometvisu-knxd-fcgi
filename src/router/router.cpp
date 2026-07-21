@@ -22,10 +22,10 @@
 
 namespace cvknxd {
 
-Router::Router(KnxdClientInterface& knxd, SessionStore& sessions, int longpoll_timeout_sec,
-               std::string base_url)
+Router::Router(KnxdClientInterface& knxd, GroupCache& cache, SessionStore& sessions,
+               int longpoll_timeout_sec, std::string base_url)
     : login_handler_(sessions, std::move(base_url)),
-      read_handler_(knxd, sessions, longpoll_timeout_sec),
+      read_handler_(knxd, cache, sessions, longpoll_timeout_sec),
       write_handler_(knxd, sessions) {}
 
 FcgiResponse Router::route(const FcgiRequest& request) {
