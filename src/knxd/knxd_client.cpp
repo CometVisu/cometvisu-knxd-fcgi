@@ -844,6 +844,17 @@ bool KnxdClient::poll_group_telegram(uint16_t& out_group_addr, std::vector<uint8
 }
 
 std::optional<LastUpdatesResult> KnxdClient::cache_last_updates_2(uint32_t start, int timeout_sec) {
+  // Read the group socket fd BEFORE acquiring cache_mutex.  Lock ordering
+  // is mutex → cache_mutex — we must not acquire mutex while holding
+  // cache_mutex because disconnect()/reconnect() do the opposite and would
+  // deadlock.  We copy the fd integer; even if disconnect() closes it
+  // concurrently, poll() on a stale fd is harmless (returns immediately).
+  int group_fd = -1;
+  {
+    std::lock_guard<std::recursive_mutex> main_lock(impl_->mutex);
+    group_fd = impl_->fd;
+  }
+
   std::lock_guard<std::recursive_mutex> lock(impl_->cache_mutex);
 
   // Retry helper: if knxd restarts during the long-poll, reconnect and retry
@@ -906,15 +917,9 @@ std::optional<LastUpdatesResult> KnxdClient::cache_last_updates_2(uint32_t start
         return std::nullopt;
       }
 
-      // Get the group socket fd (under its own mutex, released before poll).
-      // We copy the fd integer — even if disconnect() closes it concurrently,
-      // the poll will just fail cleanly (EBADF or revents=0).
-      int group_fd = -1;
-      {
-        std::lock_guard<std::recursive_mutex> main_lock(impl_->mutex);
-        group_fd = impl_->fd;
-      }
-
+      // Use group_fd from the outer scope (read before cache_mutex was
+      // acquired, respecting lock ordering).  The fd may be stale if
+      // disconnect() was called, but poll() on a stale fd is harmless.
       std::array<struct pollfd, 2> pfds = {};
       size_t nfds = 0;
       pfds[nfds].fd = *cache_fd;
