@@ -17,21 +17,20 @@
  * @file read_handler.h
  * @brief CometVisu read endpoint handler — cache reads and COMET long-poll.
  *
- * This is the most complex handler.  It implements the equivalent of the
- * reference eibread-cgi.c's main loop: subscribe to addresses, read cached
- * values on first request, then poll for changes via EIB_CACHE_LAST_UPDATES_2.
+ * Implements the equivalent of the reference eibread-cgi.c's main loop:
+ * subscribes to addresses, reads cached values on first request, then
+ * polls for changes via EIB_CACHE_LAST_UPDATES_2.
+ *
+ * Like the reference, maintains a local GroupCache updated from group
+ * socket APDU_PACKET telegrams.  This avoids round-trips to knxd's
+ * built-in cache for every value lookup, and ensures /w writes are
+ * immediately visible to blocked /r readers — the group socket echo
+ * updates GroupCache before the cache_last_updates_2 position arrives.
  *
  * Key differences from eibread-cgi:
  *   - Uses cache_last_updates_2 (32-bit position) instead of the older
  *     cache_last_updates (16-bit).  This avoids position wrap-around on
  *     busy installations.
- *   - No local cache — delegates entirely to knxd.  eibread-cgi maintained
- *     its own cache and updated it from group telegrams; we read from knxd's
- *     cache on demand via cache_read().
- *   - Belt-and-suspenders telegram drain: after cache_last_updates_2 returns,
- *     we drain the group socket for telegrams that arrived between knxd's
- *     position report and our next cache_read().  The original didn't need
- *     this because it maintained a local cache.
  *   - Does NOT send GroupValueRead on cache miss — flooding knxd's tunnel
  *     with read requests causes "Link down, terminating" on busy systems.
  */
@@ -47,6 +46,7 @@ namespace cvknxd {
 
 class KnxdClientInterface;
 class SessionStore;
+class GroupCache;
 
 /**
  * @brief Result of a read operation (GET /r).
@@ -56,9 +56,6 @@ struct ReadResult {
   int http_status = 200;
   /// @brief JSON response body (e.g. {"d":{"1/2/3":"42"},"i":"141"}).
   std::string body;
-  /// @brief New index (position) for the client to pass as `i` in the next
-  ///        read request.  Always sourced from knxd's authoritative position.
-  std::string index;
 };
 
 /**
@@ -69,8 +66,9 @@ struct ReadResult {
  * for a value change, burning zero CPU via poll()-based sleep on the knxd
  * socket.
  *
- * Uses knxd's built-in group cache via cache_read() and cache_last_updates_2()
- * — no local cache duplication, unlike the reference eibread-cgi.
+ * Maintains a local GroupCache (like the reference eibread-cgi) updated
+ * from APDU_PACKET telegrams on the group socket.  The authoritative
+ * position (`i`) always comes from knxd's cache_last_updates_2.
  *
  * Three KNX semantic correctness rules are enforced (see AGENTS.md):
  *   -# No duplicate delivery — values are deduplicated within a response.
@@ -79,7 +77,8 @@ struct ReadResult {
  */
 class ReadHandler {
 public:
-  ReadHandler(KnxdClientInterface& knxd, SessionStore& sessions, int longpoll_timeout_sec = 300);
+  ReadHandler(KnxdClientInterface& knxd, GroupCache& cache, SessionStore& sessions,
+              int longpoll_timeout_sec = 300);
 
   ~ReadHandler() = default;
 
@@ -95,13 +94,11 @@ public:
   [[nodiscard]] ReadResult handle(std::string_view query_string);
 
 private:
-  KnxdClientInterface& knxd_;  // NOLINT(cppcoreguidelines-avoid-const-or-ref-data-members)
-  SessionStore& sessions_;     // NOLINT(cppcoreguidelines-avoid-const-or-ref-data-members)
+  KnxdClientInterface& knxd_;  // NOLINT
+  GroupCache& cache_;          // NOLINT — local cache for group telegrams
+  SessionStore& sessions_;     // NOLINT
   int longpoll_timeout_sec_;
 
-  /// @brief Parse the `t` (timeout) parameter from a query string value.
-  /// @return The parsed integer, or std::nullopt if the string is not a
-  ///         valid non-negative integer.
   [[nodiscard]] static std::optional<int> parse_timeout(std::string_view t_str);
 };
 

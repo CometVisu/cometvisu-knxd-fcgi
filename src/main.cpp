@@ -55,6 +55,7 @@
 #include "knxd/knxd_connector.h"
 #include "knxd/knxd_protocol.h"
 #include "router/router.h"
+#include "state/group_cache.h"
 #include "state/session_store.h"
 #include "util/debug_log.h"
 #include "version.h"
@@ -292,14 +293,10 @@ int main(int argc, char* argv[]) {
   knxd.set_nonblocking(true);
 
   SessionStore sessions;
+  GroupCache cache;  // local cache for group telegrams (eibread-cgi style)
 
   // ---- Create router ----
-  // No local cache — we delegate to knxd's built-in cache via cache_read().
-  // base_url is captured from the process environment at startup (not via
-  // getenv() at request time), because after FCGX_Accept_r() the environ
-  // pointer is replaced with the FCGI parameter environment which may not
-  // include BASE_URL.
-  Router router(knxd, sessions, longpoll_timeout, base_url != nullptr ? base_url : "");
+  Router router(knxd, cache, sessions, longpoll_timeout, base_url != nullptr ? base_url : "");
 
   // Register the request handler on the FCGI server
   server.set_handler([&](const FcgiRequest& req) -> FcgiResponse { return router.route(req); });

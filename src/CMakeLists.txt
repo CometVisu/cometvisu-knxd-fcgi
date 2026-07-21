@@ -52,9 +52,10 @@ add_library(cvknxd_knxd STATIC
 target_include_directories(cvknxd_knxd PUBLIC ${CMAKE_CURRENT_SOURCE_DIR} ${KNXD_INCLUDE_DIR})
 target_link_libraries(cvknxd_knxd PUBLIC cvknxd_util)
 
-# ---- State library (sessions only — knxd handles its own cache) ----
+# ---- State library (sessions + local group cache) ----
 add_library(cvknxd_state STATIC
     state/session_store.cpp
+    state/group_cache.cpp
 )
 
 target_include_directories(cvknxd_state PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})

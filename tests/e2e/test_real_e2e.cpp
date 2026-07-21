@@ -27,6 +27,7 @@
 #include "knxd/knxd_protocol.h"
 #include "router/router.h"
 #include "state/session_store.h"
+#include "state/group_cache.h"
 
 using namespace cvknxd;
 
@@ -153,6 +154,7 @@ protected:
   std::string knxd_socket_path_;
   KnxdClient knxd_;
   SessionStore sessions_;
+  GroupCache cache_;
   uint16_t base_ = 0x1000;
   // NOLINTEND(misc-non-private-member-variables-in-classes)
 };
@@ -161,7 +163,7 @@ protected:
 // ---- Login ----
 
 TEST_F(RealKnxdE2ETest, LoginAnonymous) {
-  Router router(knxd_, sessions_);
+  Router router(knxd_, cache_, sessions_);
   auto resp = router.route(req("POST", "/l"));
   EXPECT_EQ(resp.status_code, 200);
   EXPECT_NE(resp.body.find("\"v\":\"0.0.2\""), std::string::npos);
@@ -169,14 +171,14 @@ TEST_F(RealKnxdE2ETest, LoginAnonymous) {
 }
 
 TEST_F(RealKnxdE2ETest, LoginAuthenticated) {
-  Router router(knxd_, sessions_);
+  Router router(knxd_, cache_, sessions_);
   auto resp = router.route(req("POST", "/l", "u=admin&p=secret&d=test"));
   EXPECT_EQ(resp.status_code, 200);
   EXPECT_EQ(resp.body.find("\"s\":\"0\""), std::string::npos);
 }
 
 TEST_F(RealKnxdE2ETest, LoginCreatesValidSession) {
-  Router router(knxd_, sessions_);
+  Router router(knxd_, cache_, sessions_);
   auto resp = router.route(req("POST", "/l", "u=user&p=pass"));
   EXPECT_EQ(resp.status_code, 200);
   const std::string s = sid(resp.body);
@@ -189,7 +191,7 @@ TEST_F(RealKnxdE2ETest, LoginCreatesValidSession) {
 
 TEST_F(RealKnxdE2ETest, InitialReadTimedPollReturnsEmpty) {
   // Use short longpoll timeout (2s) since t=0 cache-miss falls through to COMET poll
-  Router router(knxd_, sessions_, 2);
+  Router router(knxd_, cache_, sessions_, 2);
   auto resp = router.route(req("GET", "/r", "a=" + a(99) + "&t=0"));
   EXPECT_EQ(resp.status_code, 200);
   EXPECT_NE(resp.body.find("\"d\":{}"), std::string::npos);
@@ -198,17 +200,17 @@ TEST_F(RealKnxdE2ETest, InitialReadTimedPollReturnsEmpty) {
 // ---- Write ----
 
 TEST_F(RealKnxdE2ETest, WriteSingleByte) {
-  Router router(knxd_, sessions_);
+  Router router(knxd_, cache_, sessions_);
   EXPECT_EQ(router.route(req("GET", "/w", "a=" + a(1) + "&v=8042")).status_code, 200);
 }
 
 TEST_F(RealKnxdE2ETest, WriteMultiByte) {
-  Router router(knxd_, sessions_);
+  Router router(knxd_, cache_, sessions_);
   EXPECT_EQ(router.route(req("GET", "/w", "a=" + a(2) + "&v=800c6f")).status_code, 200);
 }
 
 TEST_F(RealKnxdE2ETest, WriteMultipleAddresses) {
-  Router router(knxd_, sessions_);
+  Router router(knxd_, cache_, sessions_);
   EXPECT_EQ(router.route(req("GET", "/w", "a=" + a(3) + "&a=" + a(4) + "&v=8001")).status_code,
             200);
 }
@@ -217,7 +219,7 @@ TEST_F(RealKnxdE2ETest, WriteMultipleAddresses) {
 /// in knxd's group cache.  This is the real E2E test for the user's complaint:
 /// "the FastCGI backend never passed a write package to the KNX bus".
 TEST_F(RealKnxdE2ETest, WriteReachesKnxdCache) {
-  Router router(knxd_, sessions_);
+  Router router(knxd_, cache_, sessions_);
 
   // Write value 0x42 to address a(20)
   auto wr = router.route(req("GET", "/w", "a=" + a(20) + "&v=8042"));
@@ -237,7 +239,7 @@ TEST_F(RealKnxdE2ETest, WriteReachesKnxdCache) {
 
 /// Same as above but with a multi-byte value (e.g. temperature DPT 9.001).
 TEST_F(RealKnxdE2ETest, WriteMultiByteReachesKnxdCache) {
-  Router router(knxd_, sessions_);
+  Router router(knxd_, cache_, sessions_);
 
   // Write 2-byte value 0x0C6F
   auto wr = router.route(req("GET", "/w", "a=" + a(21) + "&v=800c6f"));
@@ -256,14 +258,14 @@ TEST_F(RealKnxdE2ETest, WriteMultiByteReachesKnxdCache) {
 
 TEST_F(RealKnxdE2ETest, ReadWithTimeoutReturnsEmpty) {
   // Short longpoll timeout — cache miss falls through to COMET poll
-  Router router(knxd_, sessions_, 2);
+  Router router(knxd_, cache_, sessions_, 2);
   auto resp = router.route(req("GET", "/r", "a=" + a(5) + "&t=30"));
   EXPECT_EQ(resp.status_code, 200);
   EXPECT_NE(resp.body.find("\"d\":{}"), std::string::npos);
 }
 
 TEST_F(RealKnxdE2ETest, ReadCacheOnlyReturnsEmpty) {
-  Router router(knxd_, sessions_);
+  Router router(knxd_, cache_, sessions_);
   // t=-1: cache-only — returns 200 with empty data (never 404)
   auto resp = router.route(req("GET", "/r", "a=" + a(6) + "&t=-1"));
   EXPECT_EQ(resp.status_code, 200);
@@ -273,7 +275,7 @@ TEST_F(RealKnxdE2ETest, ReadCacheOnlyReturnsEmpty) {
 // ---- COMET Long-Poll — blocks until knxtool injects a telegram ----
 
 TEST_F(RealKnxdE2ETest, CometLongPollReceivesInjectedTelegram) {
-  Router router(knxd_, sessions_, 30);
+  Router router(knxd_, cache_, sessions_, 30);
 
   // Use k() for the raw address format without namespace prefix, matching
   // the response output. The read handler uses KnxAddress::to_cometvisu()
@@ -304,7 +306,7 @@ TEST_F(RealKnxdE2ETest, CometLongPollReceivesInjectedTelegram) {
 }
 
 TEST_F(RealKnxdE2ETest, CometLongPollSkipsNonMatchingTelegram) {
-  Router router(knxd_, sessions_, 30);
+  Router router(knxd_, cache_, sessions_, 30);
 
   std::string target = k(8);
   std::string url_addr = a(8);
@@ -332,7 +334,7 @@ TEST_F(RealKnxdE2ETest, CometLongPollSkipsNonMatchingTelegram) {
 // ---- COMET Timeout ----
 
 TEST_F(RealKnxdE2ETest, CometLongPollTimeoutReturnsEmpty) {
-  Router router(knxd_, sessions_, 2);
+  Router router(knxd_, cache_, sessions_, 2);
 
   auto start = std::chrono::steady_clock::now();
   auto resp = router.route(req("GET", "/r", "a=" + a(10)));
@@ -349,19 +351,19 @@ TEST_F(RealKnxdE2ETest, CometLongPollTimeoutReturnsEmpty) {
 // ---- Write Validation (never 400) ----
 
 TEST_F(RealKnxdE2ETest, WriteMissingAddressReturns200) {
-  Router router(knxd_, sessions_);
+  Router router(knxd_, cache_, sessions_);
   // Missing address: nothing to write → 200 (no-op)
   EXPECT_EQ(router.route(req("GET", "/w", "v=42")).status_code, 200);
 }
 
 TEST_F(RealKnxdE2ETest, WriteMissingValueReturns200) {
-  Router router(knxd_, sessions_);
+  Router router(knxd_, cache_, sessions_);
   // Missing value: nothing to write → 200 (no-op)
   EXPECT_EQ(router.route(req("GET", "/w", "a=" + a(11))).status_code, 200);
 }
 
 TEST_F(RealKnxdE2ETest, WriteInvalidHexReturns200) {
-  Router router(knxd_, sessions_);
+  Router router(knxd_, cache_, sessions_);
   // Invalid hex: cannot decode → 200 (no-op)
   EXPECT_EQ(router.route(req("GET", "/w", "a=" + a(12) + "&v=ZZ")).status_code, 200);
 }
@@ -369,7 +371,7 @@ TEST_F(RealKnxdE2ETest, WriteInvalidHexReturns200) {
 // ---- Router ----
 
 TEST_F(RealKnxdE2ETest, RouterUnknownEndpointReturns404) {
-  Router router(knxd_, sessions_);
+  Router router(knxd_, cache_, sessions_);
   auto resp = router.route(req("GET", "/nonexistent"));
   EXPECT_EQ(resp.status_code, 404);
   EXPECT_NE(resp.body.find("\"error\":\"unknown endpoint\""), std::string::npos);
@@ -378,14 +380,14 @@ TEST_F(RealKnxdE2ETest, RouterUnknownEndpointReturns404) {
 // ---- Session Validation ----
 
 TEST_F(RealKnxdE2ETest, InvalidSessionReturns401) {
-  Router router(knxd_, sessions_);
+  Router router(knxd_, cache_, sessions_);
   auto resp = router.route(req("GET", "/r", "a=" + a(13) + "&t=30&s=bad"));
   EXPECT_EQ(resp.status_code, 401);
   EXPECT_NE(resp.body.find("\"error\":\"invalid session\""), std::string::npos);
 }
 
 TEST_F(RealKnxdE2ETest, ValidSessionAllowsWrite) {
-  Router router(knxd_, sessions_);
+  Router router(knxd_, cache_, sessions_);
   auto lr = router.route(req("POST", "/l", "u=user&p=pass"));
   EXPECT_EQ(lr.status_code, 200);
   const std::string s = sid(lr.body);
@@ -396,7 +398,7 @@ TEST_F(RealKnxdE2ETest, ValidSessionAllowsWrite) {
 
 TEST_F(RealKnxdE2ETest, AnonymousSessionAllowsRead) {
   // Short timeout — cache miss falls through to COMET poll
-  Router router(knxd_, sessions_, 2);
+  Router router(knxd_, cache_, sessions_, 2);
   auto resp = router.route(req("GET", "/r", "a=" + a(15) + "&t=30&s=0"));
   EXPECT_EQ(resp.status_code, 200);
 }
@@ -413,8 +415,8 @@ TEST_F(RealKnxdE2ETest, MultiClientBothWaitingReceiveUpdate) {
   auto knxd_b = make_second_client();
   SessionStore sessions_b;
 
-  Router router_a(knxd_, sessions_, 10);
-  Router router_b(knxd_b, sessions_b, 10);
+  Router router_a(knxd_, cache_, sessions_, 10);
+  Router router_b(knxd_b, cache_, sessions_b, 10);
 
   std::string addr_a = a(40);
   std::string addr_b = a(40);  // same GA, different client
@@ -480,8 +482,8 @@ TEST_F(RealKnxdE2ETest, MultiClientNeitherWaitingStaysPolling) {
   SessionStore sessions_b;
 
   // Short timeout so we can verify continued polling
-  Router router_a(knxd_, sessions_, 3);
-  Router router_b(knxd_b, sessions_b, 3);
+  Router router_a(knxd_, cache_, sessions_, 3);
+  Router router_b(knxd_b, cache_, sessions_b, 3);
 
   // Both wait for address 41, but we write to address 42
   std::string addr_a = a(41);
@@ -525,8 +527,8 @@ TEST_F(RealKnxdE2ETest, MultiClientDifferentAddressesEachGetsOwnUpdate) {
   auto knxd_b = make_second_client();
   SessionStore sessions_b;
 
-  Router router_a(knxd_, sessions_, 10);
-  Router router_b(knxd_b, sessions_b, 10);
+  Router router_a(knxd_, cache_, sessions_, 10);
+  Router router_b(knxd_b, cache_, sessions_b, 10);
 
   std::string addr_a = a(43);
   std::string addr_b = a(44);
@@ -567,8 +569,8 @@ TEST_F(RealKnxdE2ETest, MultiClientBothWriteThenBothReadSameI) {
   SessionStore sessions_b;
 
   // Use fresh addresses (different sub than previous tests)
-  Router router_a(knxd_, sessions_, 10);
-  Router router_b(knxd_b, sessions_b, 10);
+  Router router_a(knxd_, cache_, sessions_, 10);
+  Router router_b(knxd_b, cache_, sessions_b, 10);
 
   std::string addr = a(45);
   std::string expected_key = k(45);
@@ -614,7 +616,7 @@ TEST_F(RealKnxdE2ETest, MultiClientReadWithOldIndexReturnsAllChanges) {
   auto knxd_b = make_second_client();
   SessionStore sessions_b;
 
-  Router router_a(knxd_, sessions_, 10);
+  Router router_a(knxd_, cache_, sessions_, 10);
 
   // Write multiple values using Client A
   auto wr1 = router_a.route(req("GET", "/w", "a=" + a(46) + "&v=8042"));
@@ -631,7 +633,7 @@ TEST_F(RealKnxdE2ETest, MultiClientReadWithOldIndexReturnsAllChanges) {
 
   // B reads with t=0 (force initial read), requesting all three addresses
   // plus one more. The response must contain all three written values.
-  Router router_b(knxd_b, sessions_b, 5);
+  Router router_b(knxd_b, cache_, sessions_b, 5);
   auto resp = router_b.route(
       req("GET", "/r", "a=" + a(46) + "&a=" + a(47) + "&a=" + a(48) + "&a=" + a(49) + "&t=0"));
 
@@ -652,14 +654,14 @@ TEST_F(RealKnxdE2ETest, MultiClientReadWithOldIndexReturnsAllChanges) {
 // ---- Read Validation ----
 
 TEST_F(RealKnxdE2ETest, ReadMissingAddressReturns400) {
-  Router router(knxd_, sessions_);
+  Router router(knxd_, cache_, sessions_);
   auto resp = router.route(req("GET", "/r", "t=30"));
   EXPECT_EQ(resp.status_code, 400);
   EXPECT_NE(resp.body.find("\"error\":\"missing address\""), std::string::npos);
 }
 
 TEST_F(RealKnxdE2ETest, ReadInvalidTimeoutReturns400) {
-  Router router(knxd_, sessions_);
+  Router router(knxd_, cache_, sessions_);
   auto resp = router.route(req("GET", "/r", "a=" + a(16) + "&t=abc"));
   EXPECT_EQ(resp.status_code, 400);
   EXPECT_NE(resp.body.find("\"error\":\"invalid timeout\""), std::string::npos);
@@ -676,7 +678,7 @@ TEST_F(RealKnxdE2ETest, ReadInvalidTimeoutReturns400) {
 /// Verify that after N rapid writes, a subsequent read sees the latest value
 /// and the position has advanced by at least N.
 TEST_F(RealKnxdE2ETest, MultiClientRapidWritesNoPacketLoss) {
-  Router router_a(knxd_, sessions_, 5);
+  Router router_a(knxd_, cache_, sessions_, 5);
 
   constexpr int kNumWrites = 5;
   for (int i = 0; i < kNumWrites; ++i) {
@@ -710,7 +712,7 @@ TEST_F(RealKnxdE2ETest, MultiClientRapidWritesDifferentAddressesAllArrive) {
   auto knxd_b = make_second_client();
   SessionStore sessions_b;
 
-  Router router_a(knxd_, sessions_, 5);
+  Router router_a(knxd_, cache_, sessions_, 5);
 
   // Rapidly write to 4 different addresses
   for (int i = 0; i < 4; ++i) {
@@ -721,7 +723,7 @@ TEST_F(RealKnxdE2ETest, MultiClientRapidWritesDifferentAddressesAllArrive) {
   std::this_thread::sleep_for(std::chrono::milliseconds(100));
 
   // Client B reads all 4 addresses at once (t=0 = cache-only, immediate return)
-  Router router_b(knxd_b, sessions_b, 5);
+  Router router_b(knxd_b, cache_, sessions_b, 5);
   std::string query = "a=" + a(55) + "&a=" + a(56) + "&a=" + a(57) + "&a=" + a(58) + "&t=0";
   auto resp = router_b.route(req("GET", "/r", query));
 
@@ -737,7 +739,7 @@ TEST_F(RealKnxdE2ETest, MultiClientRapidWritesDifferentAddressesAllArrive) {
 /// Position (i) must increase monotonically.  We write once, read to get i1,
 /// write again, read to get i2.  i2 must be strictly greater than i1.
 TEST_F(RealKnxdE2ETest, MultiClientPositionMonotonicallyIncreases) {
-  Router router_a(knxd_, sessions_, 5);
+  Router router_a(knxd_, cache_, sessions_, 5);
 
   // Write + read to get position after first write
   auto wr1 = router_a.route(req("GET", "/w", "a=" + a(60) + "&v=8042"));
@@ -761,7 +763,7 @@ TEST_F(RealKnxdE2ETest, MultiClientPositionMonotonicallyIncreases) {
 /// data from writes that happened before that position.
 /// Uses t=1 (short poll, not t=0 which forces initial cache read).
 TEST_F(RealKnxdE2ETest, MultiClientReadWithRecentPositionSkipsOldWrites) {
-  Router router_a(knxd_, sessions_, 5);
+  Router router_a(knxd_, cache_, sessions_, 5);
 
   // Write to address 62 and get the position after that write
   auto wr = router_a.route(req("GET", "/w", "a=" + a(62) + "&v=8042"));
@@ -799,7 +801,7 @@ TEST_F(RealKnxdE2ETest, MultiClientWriteToReadLatencyUnder500ms) {
   SessionStore sessions_b;
 
   // Use a dedicated address range to avoid stale cache from previous tests
-  Router router_b(knxd_b, sessions_b, 10);
+  Router router_b(knxd_b, cache_, sessions_b, 10);
 
   std::promise<FcgiResponse> p;
   auto f = p.get_future();
@@ -812,7 +814,7 @@ TEST_F(RealKnxdE2ETest, MultiClientWriteToReadLatencyUnder500ms) {
 
   // Client A writes
   auto t_write = std::chrono::steady_clock::now();
-  Router router_a(knxd_, sessions_, 5);
+  Router router_a(knxd_, cache_, sessions_, 5);
   auto wr = router_a.route(req("GET", "/w", "a=" + a(64) + "&v=8042"));
   EXPECT_EQ(wr.status_code, 200);
 
@@ -840,7 +842,7 @@ TEST_F(RealKnxdE2ETest, MultiClientWriteToReadLatencyUnder500ms) {
 /// which will return the written value if cached — that's also valid
 /// (the client gets the latest value instantly).
 TEST_F(RealKnxdE2ETest, MultiClientStartPollingAfterWriteReturnsImmediately) {
-  Router router_a(knxd_, sessions_, 5);
+  Router router_a(knxd_, cache_, sessions_, 5);
 
   // Write to get a non-zero position
   auto wr = router_a.route(req("GET", "/w", "a=" + a(65) + "&v=8042"));
@@ -877,7 +879,7 @@ TEST_F(RealKnxdE2ETest, MultiClientStartPollingAfterWriteReturnsImmediately) {
 /// Subscribe to many addresses (simulating a large visu page), write to one
 /// of them, and verify only that one appears in the response.
 TEST_F(RealKnxdE2ETest, MultiClientManyAddressesOnlyChangedOnesReturned) {
-  Router router_a(knxd_, sessions_, 10);
+  Router router_a(knxd_, cache_, sessions_, 10);
 
   // Build a query with 10 addresses
   std::string query = "a=" + a(70);
@@ -915,9 +917,9 @@ TEST_F(RealKnxdE2ETest, MultiClientThreeClientsAllReceiveUpdate) {
   SessionStore sessions_b;
   SessionStore sessions_c;
 
-  Router router_a(knxd_, sessions_, 10);
-  Router router_b(knxd_b, sessions_b, 10);
-  Router router_c(knxd_c, sessions_c, 10);
+  Router router_a(knxd_, cache_, sessions_, 10);
+  Router router_b(knxd_b, cache_, sessions_b, 10);
+  Router router_c(knxd_c, cache_, sessions_c, 10);
 
   std::string addr = a(80);
   std::string expected_key = k(80);
@@ -966,7 +968,7 @@ TEST_F(RealKnxdE2ETest, MultiClientPositionBasedDeltaRetrieval) {
   auto knxd_b = make_second_client();
   SessionStore sessions_b;
 
-  Router router_a(knxd_, sessions_, 5);
+  Router router_a(knxd_, cache_, sessions_, 5);
 
   // Write 3 times to the same address
   auto wr1 = router_a.route(req("GET", "/w", "a=" + a(85) + "&v=8041"));
@@ -988,7 +990,7 @@ TEST_F(RealKnxdE2ETest, MultiClientPositionBasedDeltaRetrieval) {
   ASSERT_GT(current_pos, 0U);
 
   // Client B reads with t=0 (initial read from cache)
-  Router router_b(knxd_b, sessions_b, 5);
+  Router router_b(knxd_b, cache_, sessions_b, 5);
   auto resp = router_b.route(req("GET", "/r", "a=" + a(85) + "&t=0"));
 
   EXPECT_EQ(resp.status_code, 200);
@@ -1012,7 +1014,7 @@ TEST_F(RealKnxdE2ETest, MultiClientPositionBasedDeltaRetrieval) {
 /// After a write, a sequence of reads must never return a decreasing i.
 /// Each read's i= value must be >= the previous one.
 TEST_F(RealKnxdE2ETest, IndexNeverGoesBackwardSequentialReads) {
-  Router router(knxd_, sessions_, 5);
+  Router router(knxd_, cache_, sessions_, 5);
   const std::string addr = a(90);
 
   // Write to establish a non-zero position
@@ -1038,8 +1040,8 @@ TEST_F(RealKnxdE2ETest, IndexNeverGoesBackwardSequentialReads) {
 TEST_F(RealKnxdE2ETest, IndexNeverGoesBackwardConcurrentReaders) {
   SessionStore sessions_a;
   SessionStore sessions_b;
-  Router router_a(knxd_, sessions_a, 5);
-  Router router_b(knxd_, sessions_b, 5);
+  Router router_a(knxd_, cache_, sessions_a, 5);
+  Router router_b(knxd_, cache_, sessions_b, 5);
 
   const std::string addr = a(91);
 
@@ -1086,8 +1088,8 @@ TEST_F(RealKnxdE2ETest, IndexNeverGoesBackwardIndependentConnections) {
   SessionStore sessions_a;
   SessionStore sessions_b;
 
-  Router router_a(knxd_, sessions_a, 5);
-  Router router_b(knxd_b, sessions_b, 5);
+  Router router_a(knxd_, cache_, sessions_a, 5);
+  Router router_b(knxd_b, cache_, sessions_b, 5);
 
   const std::string addr = a(92);
 
@@ -1116,8 +1118,8 @@ TEST_F(RealKnxdE2ETest, IndexNeverGoesBackwardStressTest) {
   SessionStore sessions_a;
   SessionStore sessions_b;
 
-  Router router_a(knxd_, sessions_a, 3);
-  Router router_b(knxd_b, sessions_b, 3);
+  Router router_a(knxd_, cache_, sessions_a, 3);
+  Router router_b(knxd_b, cache_, sessions_b, 3);
 
   uint32_t i_a = 0;
   uint32_t i_b = 0;
