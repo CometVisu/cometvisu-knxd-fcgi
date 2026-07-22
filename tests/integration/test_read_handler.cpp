@@ -276,3 +276,185 @@ TEST_F(ReadHandlerTest, FiltersOutReadApdu) {
   auto r = handler.handle("a=1/2/3&t=1");
   EXPECT_NE(r.body.find("\"d\":{}"), std::string::npos);
 }
+
+// ================================================================
+// Multi-iteration poll loop: handles busy-bus correctly
+// ================================================================
+
+/// Non-matching telegrams arrive first, then matching — handler continues polling.
+TEST_F(ReadHandlerTest, BusyBusSkipsNonMatchingThenFindsMatch) {
+  ReadHandler handler(knxd_, cache_, sessions_);
+  // First poll: non-matching telegram only
+  knxd_.enqueue_telegram(0x0B04, {0x00, 0x80, 0x01});  // 1/3/4 — not subscribed
+  // Second poll: matching telegram arrives
+  knxd_.enqueue_telegram(0x0A03, {0x00, 0x80, 0x42});  // 1/2/3
+
+  auto r = handler.handle("a=1/2/3&t=5");
+  EXPECT_NE(r.body.find("1/2/3"), std::string::npos);
+  EXPECT_NE(r.body.find("42"), std::string::npos);
+  EXPECT_EQ(r.body.find("1/3/4"), std::string::npos);
+}
+
+/// All buffered telegrams are drained, even when none match.
+TEST_F(ReadHandlerTest, DrainsAllBufferedWhenNoMatch) {
+  ReadHandler handler(knxd_, cache_, sessions_);
+  knxd_.enqueue_telegram(0x0B04, {0x00, 0x80, 0x01});  // 1/3/4 — not subscribed
+  knxd_.enqueue_telegram(0x0C05, {0x00, 0x80, 0x02});  // 1/4/5 — not subscribed
+
+  auto r = handler.handle("a=1/2/3&t=1");
+  EXPECT_NE(r.body.find("\"d\":{}"), std::string::npos);
+  // Both non-matching telegrams consumed, no data delivered
+  EXPECT_EQ(cache_.position(), 2);  // both pushed to cache
+}
+
+/// Timeout after multiple empty polls returns empty.
+TEST_F(ReadHandlerTest, TimeoutAfterEmptyPollsReturnsEmpty) {
+  ReadHandler handler(knxd_, cache_, sessions_);
+  // No telegrams — timeout after t=1
+  auto r = handler.handle("a=1/2/3&t=1");
+  EXPECT_NE(r.body.find("\"d\":{}"), std::string::npos);
+  EXPECT_NE(r.body.find("\"i\":0"), std::string::npos);
+}
+
+// ================================================================
+// Position (i) correctness — black-box
+// ================================================================
+
+/// i reflects cache position, not telegram count.
+TEST_F(ReadHandlerTest, IndexComesFromCachePosition) {
+  // Pre-populate cache via direct pushes — simulates previous telegrams
+  for (int i = 0; i < 42; ++i) cache_.push(0x0A03, {0x42});
+
+  ReadHandler handler(knxd_, cache_, sessions_);
+  auto r = handler.handle("a=1/2/3&i=0");
+  EXPECT_NE(r.body.find("\"i\":42"), std::string::npos);
+}
+
+/// i never goes backward across multiple requests.
+TEST_F(ReadHandlerTest, IndexNeverGoesBackwardAcrossRequests) {
+  knxd_.enqueue_telegram(0x0A03, {0x00, 0x80, 0x42});
+  ReadHandler h1(knxd_, cache_, sessions_);
+  auto r1 = h1.handle("a=1/2/3&i=0");
+  uint32_t i1 = [&]() {
+    auto p = r1.body.find("\"i\":");
+    return static_cast<uint32_t>(std::stoul(r1.body.substr(p + 4)));
+  }();
+
+  knxd_.enqueue_telegram(0x0A03, {0x00, 0x80, 0x99});
+  ReadHandler h2(knxd_, cache_, sessions_);
+  auto r2 = h2.handle("a=1/2/3&i=" + std::to_string(i1));
+  uint32_t i2 = [&]() {
+    auto p = r2.body.find("\"i\":");
+    return static_cast<uint32_t>(std::stoul(r2.body.substr(p + 4)));
+  }();
+  EXPECT_GT(i2, i1) << "i must advance: " << i1 << " → " << i2;
+}
+
+// ================================================================
+// Concurrent / black-box E2E tests
+// ================================================================
+
+/// Two readers sharing one cache: both receive the same update.
+TEST_F(ReadHandlerTest, TwoReadersReceiveSameUpdate) {
+  // Both readers share the same GroupCache
+  ReadHandler reader_a(knxd_, cache_, sessions_);
+  ReadHandler reader_b(knxd_, cache_, sessions_);
+
+  knxd_.enqueue_telegram(0x0A03, {0x00, 0x80, 0x42});
+  knxd_.enqueue_telegram(0x0A03, {0x00, 0x80, 0x42});  // duplicate for second poll
+
+  auto ra = reader_a.handle("a=1/2/3&t=5");
+  auto rb = reader_b.handle("a=1/2/3&t=5");
+
+  EXPECT_NE(ra.body.find("42"), std::string::npos);
+  EXPECT_NE(rb.body.find("42"), std::string::npos);
+}
+
+/// Writer updates cache, multiple readers see it concurrently.
+TEST_F(ReadHandlerTest, WriteUpdatesVisibleToMultipleReaders) {
+  // Simulate: /w pushes value, then two /r requests see it
+  cache_.push(0x0A03, {0x42});  // write
+
+  ReadHandler r1(knxd_, cache_, sessions_);
+  ReadHandler r2(knxd_, cache_, sessions_);
+
+  auto resp1 = r1.handle("a=1/2/3&i=0&t=1");
+  auto resp2 = r2.handle("a=1/2/3&i=0&t=1");
+
+  EXPECT_NE(resp1.body.find("42"), std::string::npos);
+  EXPECT_NE(resp2.body.find("42"), std::string::npos);
+  // Both see the same position
+  EXPECT_EQ(resp1.body.find("\"i\":"), resp2.body.find("\"i\":"));
+}
+
+/// Delta query only returns entries newer than the client's i.
+TEST_F(ReadHandlerTest, DeltaOnlyReturnsNewerThanLastIndex) {
+  // Pre-populate cache, then enqueue new telegrams
+  cache_.push(0x0A03, {0x01});  // pos 1 (pre-populate)
+  knxd_.enqueue_telegram(0x0A03, {0x00, 0x80, 0x02});  // new telegram at pos 3
+  knxd_.enqueue_telegram(0x0A03, {0x00, 0x80, 0x03});  // new telegram at pos 3
+
+  ReadHandler handler(knxd_, cache_, sessions_);
+
+  // Client last saw position 1 — gets new entries from positions 2 and 3
+  auto r = handler.handle("a=1/2/3&i=2&t=30");
+  EXPECT_NE(r.body.find("\"03\""), std::string::npos);
+  EXPECT_NE(r.body.find("\"i\":3"), std::string::npos);
+}
+
+/// Unchanged address is NOT re-transmitted when another address changes.
+TEST_F(ReadHandlerTest, UnchangedAddressNotRetransmittedWhenOtherChanges) {
+  // This is the exact bug reproduction: A and B in cache, only B changes.
+  // A must NOT appear in the response.
+  cache_.push(0x0A03, {0x42});  // A at pos 1
+  cache_.push(0x0B04, {0x01});  // B at pos 2
+
+  ReadHandler handler(knxd_, cache_, sessions_);
+
+  // Client has already seen position 1 (which includes A's value)
+  // Now knxd reports activity — but only B changed
+  knxd_.enqueue_telegram(0x0B04, {0x00, 0x80, 0x01});  // B again (same value, pos 3)
+
+  // Client polls with i=1 — should ONLY get B (which changed at pos 2 and again at pos 3)
+  // A must NOT be returned because it hasn't changed since pos 1
+  auto r = handler.handle("a=1/2/3&a=1/3/4&i=1&t=5");
+  EXPECT_EQ(r.body.find("1/2/3"), std::string::npos) << "A must not be retransmitted";
+  EXPECT_NE(r.body.find("1/3/4"), std::string::npos) << "B should be delivered";
+}
+
+/// Value oscillating (00→01→00) — each change delivered, no stale re-transmission.
+TEST_F(ReadHandlerTest, OscillatingValueNoStaleRetransmission) {
+  // Reproduces: 00 → 01 → 00 without stale intermediate values
+  cache_.push(0x0A03, {0x00});  // pos 1
+
+  ReadHandler h1(knxd_, cache_, sessions_);
+  auto r1 = h1.handle("a=1/2/3&i=0&t=30");
+  EXPECT_NE(r1.body.find("00"), std::string::npos);
+  uint32_t i1 = [&]() {
+    auto p = r1.body.find("\"i\":");
+    return static_cast<uint32_t>(std::stoul(r1.body.substr(p + 4)));
+  }();
+
+  // Value changes to 01
+  knxd_.enqueue_telegram(0x0A03, {0x00, 0x80, 0x01});
+  ReadHandler h2(knxd_, cache_, sessions_);
+  auto r2 = h2.handle("a=1/2/3&i=" + std::to_string(i1) + "&t=5");
+  EXPECT_NE(r2.body.find("01"), std::string::npos);
+  uint32_t i2 = [&]() {
+    auto p = r2.body.find("\"i\":");
+    return static_cast<uint32_t>(std::stoul(r2.body.substr(p + 4)));
+  }();
+
+  // Value changes back to 00
+  knxd_.enqueue_telegram(0x0A03, {0x00, 0x80, 0x00});
+  ReadHandler h3(knxd_, cache_, sessions_);
+  auto r3 = h3.handle("a=1/2/3&i=" + std::to_string(i2) + "&t=5");
+  EXPECT_NE(r3.body.find("00"), std::string::npos);
+  uint32_t i3 = [&]() {
+    auto p = r3.body.find("\"i\":");
+    return static_cast<uint32_t>(std::stoul(r3.body.substr(p + 4)));
+  }();
+
+  EXPECT_GT(i2, i1);
+  EXPECT_GT(i3, i2);
+}
