@@ -30,8 +30,10 @@
  * Key differences from eibread-cgi:
  *   - Uses a shared-memory cache with process-shared mutex/condvar
  *     instead of per-process caches or knxd's built-in cache.
- *   - Does NOT send GroupValueRead on cache miss — flooding knxd's tunnel
- *     with read requests causes "Link down, terminating" on busy systems.
+ *   - For t=0 (read from bus): sends GroupValueRead for uncached addresses
+ *     via the worker's write-only group socket, then returns immediately.
+ *     Read-responses arrive asynchronously and are handled like normal bus
+ *     writes by the cache reader process.
  */
 
 #ifndef COMETVISU_KNXD_FCGI_READ_HANDLER_H_
@@ -77,7 +79,8 @@ struct ReadResult {
  */
 class ReadHandler {
 public:
-  ReadHandler(SharedGroupCache& cache, SessionStore& sessions, int longpoll_timeout_sec = 300);
+  ReadHandler(SharedGroupCache& cache, KnxdClientInterface& knxd, SessionStore& sessions,
+              int longpoll_timeout_sec = 300);
 
   ~ReadHandler() = default;
 
@@ -93,8 +96,9 @@ public:
   [[nodiscard]] ReadResult handle(std::string_view query_string);
 
 private:
-  SharedGroupCache& cache_;  // NOLINT — shared cache for group telegrams
-  SessionStore& sessions_;   // NOLINT
+  SharedGroupCache& cache_;    // NOLINT — shared cache for group telegrams
+  KnxdClientInterface& knxd_;  // NOLINT — for sending GroupValueRead on t=0
+  SessionStore& sessions_;     // NOLINT
   int longpoll_timeout_sec_;
 
   [[nodiscard]] static std::optional<int> parse_timeout(std::string_view t_str);

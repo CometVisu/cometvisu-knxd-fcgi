@@ -283,7 +283,7 @@ int main(int argc, char* argv[]) {
     std::cerr << "[ERROR] Failed to create shared group cache\n";
     return 1;
   }
-  std::cout << "[INFO] Shared group cache created (" << shared_cache.region_size()
+  std::cout << "[INFO] Shared group cache created (" << SharedGroupCache::region_size()
             << " bytes, capacity=" << kSharedCacheCapacity << ")\n";
 
   // ---- Connect to knxd with retry (parent's connection) ----

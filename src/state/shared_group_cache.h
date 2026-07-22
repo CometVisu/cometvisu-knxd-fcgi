@@ -40,7 +40,6 @@
 #include <ctime>
 #include <optional>
 #include <set>
-#include <string>
 #include <unordered_map>
 #include <vector>
 
@@ -58,7 +57,7 @@ struct SharedCacheEntry {
   uint16_t value_len = 0;                    // actual value bytes used
   uint32_t timestamp = 0;                    // Unix epoch seconds
   uint32_t pushed_at = 0;                    // cache position when pushed
-  uint8_t value[kMaxSharedValueBytes] = {};  // KNX APDU data bytes
+  uint8_t value[kMaxSharedValueBytes] = {};  // NOLINT(modernize-avoid-c-arrays)
 };
 static_assert(std::is_trivially_copyable_v<SharedCacheEntry>,
               "SharedCacheEntry must be POD for shared memory");
@@ -69,9 +68,9 @@ struct SharedCacheData {
   alignas(64) pthread_mutex_t mutex;
   alignas(64) pthread_cond_t cond;
   std::atomic<uint32_t> position{0};
-  std::atomic<uint32_t> generation{0};  // incremented on each push
-  uint32_t num_entries{0};              // current count (≤ kSharedCacheCapacity)
-  SharedCacheEntry entries[kSharedCacheCapacity]{};
+  std::atomic<uint32_t> generation{0};               // incremented on each push
+  uint32_t num_entries{0};                           // current count (≤ kSharedCacheCapacity)
+  SharedCacheEntry entries[kSharedCacheCapacity]{};  // NOLINT(modernize-avoid-c-arrays)
 };
 
 /**

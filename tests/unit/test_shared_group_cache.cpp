@@ -275,3 +275,77 @@ TEST_F(SharedGroupCacheTest, ManyEntries) {
 
   EXPECT_EQ(cache_.position(), 500);
 }
+
+// ================================================================
+// max_age_sec = -1 (no age filter) — the default
+// ================================================================
+
+/// get() with max_age_sec=-1 must always return the cached entry regardless
+/// of age.  This is the default and the semantically correct behavior for
+/// initial reads — the caller wants the latest known value, not a value
+/// filtered by an arbitrary time window.
+TEST_F(SharedGroupCacheTest, GetWithNoAgeFilterReturnsData) {
+  cache_.push(0x0A03, {0x42});
+  auto val = cache_.get(0x0A03, -1);
+  ASSERT_TRUE(val.has_value());
+  EXPECT_EQ((*val)[0], 0x42);
+}
+
+/// Contrast: get() with max_age_sec=0 rejects everything (timestamp never
+/// strictly less than 0 seconds old).  get() with max_age_sec=-1 accepts
+/// everything.  This is why the ReadHandler must pass -1, not timeout_sec.
+TEST_F(SharedGroupCacheTest, GetAgeZeroVsNoFilter) {
+  cache_.push(0x0A03, {0x42});
+
+  // max_age_sec=0: entry is "now - now >= 0" → rejected.
+  auto val_zero = cache_.get(0x0A03, 0);
+  EXPECT_FALSE(val_zero.has_value())
+      << "max_age_sec=0 must reject all entries (no entry can be <0s old)";
+
+  // max_age_sec=-1: no age filter → accepted.
+  auto val_no_filter = cache_.get(0x0A03, -1);
+  ASSERT_TRUE(val_no_filter.has_value());
+  EXPECT_EQ((*val_no_filter)[0], 0x42);
+}
+
+/// get_delta() with max_age_sec=-1 must filter ONLY by position
+/// (pushed_at > since_pos), never by age.
+TEST_F(SharedGroupCacheTest, GetDeltaWithNoAgeFilterReturnsByPositionOnly) {
+  cache_.push(0x0A03, {0x01});  // pos 1
+  cache_.push(0x0A03, {0x02});  // pos 2
+  cache_.push(0x0A03, {0x03});  // pos 3
+
+  // since_pos=1: pushed_at > 1 → pos 2 and 3 returned.
+  auto delta = cache_.get_delta(1, {0x0A03}, -1);
+  EXPECT_EQ(delta.values.size(), 1);  // latest value for 0x0A03 only
+  EXPECT_TRUE(delta.values.contains(0x0A03));
+  EXPECT_EQ(delta.values[0x0A03][0], 0x03);
+  EXPECT_EQ(delta.position, 3);
+
+  // since_pos=2: pushed_at > 2 → pos 3 returned.
+  auto delta2 = cache_.get_delta(2, {0x0A03}, -1);
+  EXPECT_EQ(delta2.values.size(), 1);
+  EXPECT_EQ(delta2.values[0x0A03][0], 0x03);
+
+  // since_pos=3: nothing newer → empty.
+  auto delta3 = cache_.get_delta(3, {0x0A03}, -1);
+  EXPECT_TRUE(delta3.values.empty());
+  EXPECT_EQ(delta3.position, 3);
+}
+
+/// get_delta() with max_age_sec=0 must NOT return entries (same as get).
+/// This demonstrates why passing timeout_sec as max_age_sec is dangerous:
+/// with t=0 (timeout_sec=1), entries pushed 1+ seconds ago would be hidden.
+TEST_F(SharedGroupCacheTest, GetDeltaWithAgeZeroRejectsAll) {
+  cache_.push(0x0A03, {0x42});  // pos 1
+
+  // max_age_sec=0: age filter rejects everything.
+  auto delta = cache_.get_delta(0, {0x0A03}, 0);
+  EXPECT_TRUE(delta.values.empty()) << "max_age_sec=0 must reject all entries in get_delta";
+  EXPECT_EQ(delta.position, 1);  // position is still reported
+
+  // max_age_sec=-1: no age filter → entry returned.
+  auto delta2 = cache_.get_delta(0, {0x0A03}, -1);
+  EXPECT_EQ(delta2.values.size(), 1);
+  EXPECT_TRUE(delta2.values.contains(0x0A03));
+}
