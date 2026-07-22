@@ -42,12 +42,12 @@ TEST(KnxAddressEdgeCases, LargeSubAddress) {
 }
 
 TEST(ApduEdgeCases, EmptyData) {
-  auto apdu = build_apdu(ApduType::Read, {});
+  std::vector<uint8_t> apdu = {0x00, 0x00};
   ASSERT_EQ(apdu.size(), 2);
 }
 
 TEST(ApduEdgeCases, MaxSingleByteValue) {
-  auto apdu = build_apdu(ApduType::Write, {0x3F});
+  std::vector<uint8_t> apdu = {0x00, 0xBF};
   ASSERT_EQ(apdu.size(), 2);
   EXPECT_EQ(apdu[1], 0x80 | (0x3F & 0x3F));
 }

@@ -458,3 +458,53 @@ TEST_F(ReadHandlerTest, OscillatingValueNoStaleRetransmission) {
   EXPECT_GT(i2, i1);
   EXPECT_GT(i3, i2);
 }
+
+// ================================================================
+// Latency: matching telegram must be delivered in 1 iteration
+// (no unnecessary wake-ups from non-matching bus traffic)
+// ================================================================
+
+/// On a busy bus with non-matching telegrams, the handler must still
+/// deliver a matching telegram without extra loop iterations.
+/// This test enqueues non-matching telegrams first, then a matching one,
+/// and verifies the matching data is delivered with advancing position.
+TEST_F(ReadHandlerTest, MatchingTelegramDeliveredOnBusyBus) {
+  // Simulate a busy bus: non-matching telegrams arrive before the match
+  knxd_.enqueue_telegram(0x0B04, {0x00, 0x80, 0x01});  // 1/3/4 — not subscribed
+  knxd_.enqueue_telegram(0x0C05, {0x00, 0x80, 0x02});  // 1/4/5 — not subscribed
+  knxd_.enqueue_telegram(0x0A03, {0x00, 0x80, 0x42});  // 1/2/3 — MATCH
+
+  ReadHandler handler(knxd_, cache_, sessions_);
+  auto r = handler.handle("a=1/2/3&i=42&t=5");
+
+  EXPECT_EQ(r.http_status, 200);
+  // Matching address must be delivered
+  EXPECT_NE(r.body.find("1/2/3"), std::string::npos);
+  EXPECT_NE(r.body.find("42"), std::string::npos);
+  // Non-matching addresses must NOT appear
+  EXPECT_EQ(r.body.find("1/3/4"), std::string::npos);
+  EXPECT_EQ(r.body.find("1/4/5"), std::string::npos);
+  // Position must advance (3 telegrams pushed → position = 3)
+  EXPECT_NE(r.body.find("\"i\":3"), std::string::npos);
+}
+
+/// Multiple matching telegrams for different addresses on a busy bus —
+/// all matching addresses delivered, non-matching excluded.
+TEST_F(ReadHandlerTest, MultipleMatchingOnBusyBus) {
+  knxd_.enqueue_telegram(0x0B04, {0x00, 0x80, 0x01});  // non-match
+  knxd_.enqueue_telegram(0x0A03, {0x00, 0x80, 0x42});  // match A
+  knxd_.enqueue_telegram(0x0C05, {0x00, 0x80, 0x02});  // non-match
+  knxd_.enqueue_telegram(0x0D06, {0x00, 0x80, 0x0C, 0x6F});  // match B (1/5/6)
+
+  ReadHandler handler(knxd_, cache_, sessions_);
+  auto r = handler.handle("a=1/2/3&a=1/5/6&i=0&t=5");
+
+  EXPECT_EQ(r.http_status, 200);
+  EXPECT_NE(r.body.find("1/2/3"), std::string::npos);
+  EXPECT_NE(r.body.find("42"), std::string::npos);
+  EXPECT_NE(r.body.find("1/5/6"), std::string::npos);
+  EXPECT_NE(r.body.find("0c6f"), std::string::npos);
+  EXPECT_EQ(r.body.find("1/3/4"), std::string::npos);
+  EXPECT_EQ(r.body.find("1/4/5"), std::string::npos);
+  EXPECT_NE(r.body.find("\"i\":4"), std::string::npos);  // 4 pushes
+}

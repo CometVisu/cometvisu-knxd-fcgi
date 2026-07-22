@@ -15,12 +15,13 @@
 
 /**
  * @file read_handler.cpp
- * @brief CometVisu /r endpoint — ring-cache based, zero knxd-cache dependency.
+ * @brief CometVisu /r endpoint — ring-cache based, single knxd connection.
  *
- * Group telegrams are drained from the group socket, pushed into a
- * ring-buffer GroupCache, and delivered to clients with the cache's
- * authoritative position as `i`.  No cache_last_updates_2, no cache_read,
- * no manual position manipulation — the cache is the single source of truth.
+ * Group telegrams are drained from the group socket, pushed into
+ * GroupCache (which owns the authoritative position), and delivered
+ * to clients.  The `i` value always comes from cache_.position() —
+ * never fabricated or manipulated.  wait_for_activity() blocks on
+ * the group socket fd with zero CPU via kernel poll().
  */
 
 #include "read_handler.h"
@@ -31,7 +32,6 @@
 #include <optional>
 #include <set>
 #include <string>
-#include <unordered_map>
 #include <vector>
 
 #include "knxd/knxd_client.h"
@@ -44,34 +44,35 @@
 
 namespace cvknxd {
 
-ReadHandler::ReadHandler(KnxdClientInterface& knxd, GroupCache& cache, SessionStore& sessions,
-                         int longpoll_timeout_sec)
+ReadHandler::ReadHandler(KnxdClientInterface& knxd, GroupCache& cache,
+                         SessionStore& sessions, int longpoll_timeout_sec)
     : knxd_(knxd),
       cache_(cache),
       sessions_(sessions),
       longpoll_timeout_sec_(longpoll_timeout_sec) {}
 
 std::optional<int> ReadHandler::parse_timeout(std::string_view t_str) {
-  if (t_str.empty())
-    return std::nullopt;
+  if (t_str.empty()) { return std::nullopt; }
   int val = 0;
-  const auto [ptr, ec] = std::from_chars(t_str.data(), t_str.data() + t_str.size(), val);
-  if (ec != std::errc{})
-    return std::nullopt;
-  if (ptr != t_str.data() + t_str.size())
-    return std::nullopt;
+  const auto [ptr, ec] =
+      std::from_chars(t_str.data(), t_str.data() + t_str.size(), val);
+  if (ec != std::errc{}) { return std::nullopt; }
+  if (ptr != t_str.data() + t_str.size()) { return std::nullopt; }
   return val;
 }
 
-/// Drain group telegrams from the socket, push each into the ring cache.
+/// Drain all pending group telegrams from the socket into GroupCache.
+/// The cache position advances automatically on each push().
 static void drain_into_cache(KnxdClientInterface& knxd, GroupCache& cache) {
   uint16_t addr = 0;
   std::vector<uint8_t> apdu;
   while (knxd.poll_group_telegram(addr, apdu)) {
     ApduType apdu_type{};
     std::vector<uint8_t> value_data;
-    if (!parse_apdu(apdu, apdu_type, value_data) || apdu_type == ApduType::Read)
+    if (!parse_apdu(apdu, apdu_type, value_data) ||
+        apdu_type == ApduType::Read) {
       continue;
+    }
     cache.push(addr, value_data);
   }
 }
@@ -107,8 +108,7 @@ ReadResult ReadHandler::handle(std::string_view query_string) {
   uint32_t lastpos = 0;
   if (auto i_opt = params.get("i")) {
     const auto parsed = parse_timeout(*i_opt);
-    if (parsed && *parsed >= 0)
-      lastpos = static_cast<uint32_t>(*parsed);
+    if (parsed && *parsed >= 0) { lastpos = static_cast<uint32_t>(*parsed); }
   }
   if (timeout_sec == 0) {
     lastpos = 0;
@@ -119,8 +119,7 @@ ReadResult ReadHandler::handle(std::string_view query_string) {
   std::set<uint16_t> eib_addrs;
   for (const auto& addr_str : addresses) {
     const auto parsed = KnxAddress::from_cometvisu(addr_str);
-    if (parsed)
-      eib_addrs.insert(parsed->group.to_eibaddr());
+    if (parsed) { eib_addrs.insert(parsed->group.to_eibaddr()); }
   }
   if (eib_addrs.empty()) {
     result.http_status = 404;
@@ -140,16 +139,17 @@ ReadResult ReadHandler::handle(std::string_view query_string) {
   json.start_object();
   std::set<uint16_t> already_written;
 
-  // ---- Initial read: get latest values from ring cache ----
+  // ---- Initial read: latest values from GroupCache ----
+  // The cache position is authoritative — we use it as i= directly.
   if (lastpos == 0) {
     for (auto addr : eib_addrs) {
       auto cached = cache_.get(addr, timeout_sec);
       if (cached) {
-        json.add_string(addr_key(addr), hex_encode(cached->data(), cached->size()));
+        json.add_string(addr_key(addr),
+                        hex_encode(cached->data(), cached->size()));
         already_written.insert(addr);
       }
     }
-    // Use cache position as i (may be 0 if cache is empty)
     lastpos = cache_.position();
   }
 
@@ -158,37 +158,37 @@ ReadResult ReadHandler::handle(std::string_view query_string) {
   bool written = !already_written.empty();
 
   while (timeout_sec > 0) {
-    const auto elapsed =
-        std::chrono::duration_cast<std::chrono::seconds>(std::chrono::steady_clock::now() - tstart)
-            .count();
+    const auto elapsed = std::chrono::duration_cast<std::chrono::seconds>(
+                             std::chrono::steady_clock::now() - tstart)
+                             .count();
     int remaining = timeout_sec - static_cast<int>(elapsed);
-    if (remaining <= 0)
-      break;
+    if (remaining <= 0) { break; }
 
+    // Block on the group socket fd — kernel puts process to sleep.
+    // Wakes immediately when a group telegram (including /w echo) arrives.
     auto activity = knxd_.wait_for_activity(remaining * 1000);
-    if (activity == KnxdClientInterface::WaitResult::Timeout)
-      break;
+    if (activity == KnxdClientInterface::WaitResult::Timeout) { break; }
 
-    // Drain all pending telegrams into the ring cache
+    // Push all pending telegrams into the cache (position auto-advances).
     drain_into_cache(knxd_, cache_);
 
-    // Query cache for new entries since our last known position
+    // Query cache for entries newer than the client's last-known position.
     auto delta = cache_.get_delta(lastpos, eib_addrs, timeout_sec);
 
-    // Deliver matching entries
     for (const auto& [addr, val] : delta.values) {
       if (!already_written.contains(addr)) {
-        json.add_string(addr_key(addr), hex_encode(val.data(), val.size()));
+        json.add_string(addr_key(addr),
+                        hex_encode(val.data(), val.size()));
         already_written.insert(addr);
         written = true;
       }
     }
 
-    // Position comes from the cache — authoritative, never manipulated
+    // Position comes from the cache — the single source of truth.
+    // Never fabricated, never manipulated.
     lastpos = delta.position;
 
-    if (written)
-      break;
+    if (written) { break; }
   }
 
   json.end_object();  // d

@@ -22,7 +22,7 @@
  * follow the eibd specification as implemented by knxd.
  *
  * @note Single-byte values exceeding 6 bits (0x3F) are auto-promoted to
- *       multi-byte format in build_apdu().  The reference eibread-cgi
+ *       the reference eibread-cgi
  *       silently truncated such values to 6 bits; we preserve the full
  *       value to support 1-byte DPTs with values > 63 (e.g. DPT 5.010).
  */
@@ -140,34 +140,7 @@ std::string_view KnxAddress::get_default_namespace() {
   return default_namespace_;
 }
 
-// ---- APDU ----
-
-std::vector<uint8_t> build_apdu(ApduType type, const std::vector<uint8_t>& data) {
-  std::vector<uint8_t> result;
-  result.reserve(2 + data.size());
-  result.push_back(0x00);  // APDU byte 0 for group value
-
-  if (data.empty()) {
-    // Read request: just the type marker
-    result.push_back(static_cast<uint8_t>(type));
-  } else if (data.size() == 1) {
-    if ((data.front() & ~0x3F) == 0) {
-      // Single-byte value fitting in 6 bits: pack into APDU byte 1.
-      result.push_back(static_cast<uint8_t>(type) | data.front());
-    } else {
-      // Single-byte value exceeding 6 bits: auto-promote to multi-byte
-      // format so the full value is preserved.
-      result.push_back(static_cast<uint8_t>(type));
-      result.insert(result.end(), data.begin(), data.end());
-    }
-  } else {
-    // Multi-byte value: type marker in byte 1, data follows
-    result.push_back(static_cast<uint8_t>(type));
-    result.insert(result.end(), data.begin(), data.end());
-  }
-
-  return result;
-}
+// ---- APDU parsing ----
 
 bool parse_apdu(const std::vector<uint8_t>& apdu, ApduType& out_type,
                 std::vector<uint8_t>& out_data) {
@@ -276,58 +249,6 @@ std::vector<uint8_t> build_group_packet(uint16_t group_addr, const std::vector<u
   data.push_back(static_cast<uint8_t>(group_addr & 0xFF));
   data.insert(data.end(), apdu.begin(), apdu.end());
   return build_eibd_message(EIB_GROUP_PACKET, data);
-}
-
-std::vector<uint8_t> build_cache_read(uint16_t group_addr) {
-  // Payload: [type:2][addr:2]
-  return build_eibd_message(EIB_CACHE_READ, {static_cast<uint8_t>((group_addr >> 8) & 0xFF),
-                                             static_cast<uint8_t>(group_addr & 0xFF)});
-}
-
-std::vector<uint8_t> build_cache_read_nowait(uint16_t group_addr) {
-  // Payload: [type:2][addr:2]
-  return build_eibd_message(EIB_CACHE_READ_NOWAIT, {static_cast<uint8_t>((group_addr >> 8) & 0xFF),
-                                                    static_cast<uint8_t>(group_addr & 0xFF)});
-}
-
-std::vector<uint8_t> build_cache_last_updates_2(uint32_t start, int timeout_sec) {
-  // Payload: [type:2][start:4][timeout:2]
-  std::vector<uint8_t> data;
-  data.reserve(6);
-  data.push_back(static_cast<uint8_t>((start >> 24) & 0xFF));
-  data.push_back(static_cast<uint8_t>((start >> 16) & 0xFF));
-  data.push_back(static_cast<uint8_t>((start >> 8) & 0xFF));
-  data.push_back(static_cast<uint8_t>(start & 0xFF));
-  data.push_back(static_cast<uint8_t>((timeout_sec >> 8) & 0xFF));
-  data.push_back(static_cast<uint8_t>(timeout_sec & 0xFF));
-  return build_eibd_message(EIB_CACHE_LAST_UPDATES_2, data);
-}
-
-std::optional<LastUpdatesResult> parse_cache_last_updates_2_response(
-    const std::vector<uint8_t>& data) {
-  // Response payload: [end:4][addrs:N*2]
-  if (data.size() < 4) {
-    return std::nullopt;
-  }
-
-  LastUpdatesResult result;
-  result.new_position =
-      (static_cast<uint32_t>(data.at(0)) << 24) | (static_cast<uint32_t>(data.at(1)) << 16) |
-      (static_cast<uint32_t>(data.at(2)) << 8) | static_cast<uint32_t>(data.at(3));
-
-  // Remaining bytes are pairs of group addresses
-  const size_t remaining = data.size() - 4;
-  if (remaining % 2 != 0) {
-    return std::nullopt;  // must be even number of bytes
-  }
-
-  for (size_t i = 4; i < data.size(); i += 2) {
-    const auto addr =
-        static_cast<uint16_t>((data.at(i) << 8) | static_cast<uint16_t>(data.at(i + 1)));
-    result.changed_addresses.push_back(addr);
-  }
-
-  return result;
 }
 
 }  // namespace cvknxd
