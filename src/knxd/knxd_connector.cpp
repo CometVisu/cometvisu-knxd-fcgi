@@ -45,6 +45,7 @@ bool connect_knxd_with_retry(KnxdClientInterface& knxd, const char* socket_path,
       return true;
     }
     if (attempt < total_attempts) {
+      // NOLINTNEXTLINE(cppcoreguidelines-pro-bounds-pointer-arithmetic)
       int delay = delays_ms[attempt - 1];
       std::cerr << "[WARN] knxd connection attempt " << attempt << "/" << total_attempts
                 << " failed, retrying in " << delay << "ms...\n";

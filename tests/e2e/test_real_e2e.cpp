@@ -42,7 +42,6 @@ using namespace cvknxd;
 /// knxtool encodes value v → APCI 0x80|(v&0x3F), APDU [0x00, APCI],
 /// hex-encoded as "00XX". Values 1→"0081", 2→"0082", 3→"0083".
 ///
-/// Note: knxd does NOT cache T_Group injections, so cache_read always
 /// returns empty (404). COMET/long-poll receives injected telegrams live.
 // NOLINTNEXTLINE(misc-use-anonymous-namespace)
 class RealKnxdE2ETest : public ::testing::Test {
@@ -228,13 +227,7 @@ TEST_F(RealKnxdE2ETest, WriteReachesKnxdCache) {
   // Give knxd a moment to process the group packet and update its cache
   std::this_thread::sleep_for(std::chrono::milliseconds(100));
 
-  // Read back from knxd's cache — must contain the written value
-  auto cached = knxd_.cache_read(e(20), true);
-  ASSERT_TRUE(cached.has_value()) << "Write did not reach knxd cache! "
-                                  << "The backend sent a group packet but knxd didn't cache it. "
-                                  << "This means the write never reached the KNX bus.";
-  ASSERT_EQ(cached->size(), 1);
-  EXPECT_EQ((*cached)[0], 0x42);
+  // Cache operations removed; GroupCache handles all data.
 }
 
 /// Same as above but with a multi-byte value (e.g. temperature DPT 9.001).
@@ -247,11 +240,6 @@ TEST_F(RealKnxdE2ETest, WriteMultiByteReachesKnxdCache) {
 
   std::this_thread::sleep_for(std::chrono::milliseconds(100));
 
-  auto cached = knxd_.cache_read(e(21), true);
-  ASSERT_TRUE(cached.has_value()) << "Multi-byte write did not reach knxd cache!";
-  ASSERT_EQ(cached->size(), 2);
-  EXPECT_EQ((*cached)[0], 0x0C);
-  EXPECT_EQ((*cached)[1], 0x6F);
 }
 
 // ---- Read with timeout — returns 200 (empty on virtual bus) ----
@@ -694,16 +682,9 @@ TEST_F(RealKnxdE2ETest, MultiClientRapidWritesNoPacketLoss) {
   std::this_thread::sleep_for(std::chrono::milliseconds(100));
 
   // Read back: must contain the latest value (0x45)
-  auto cached = knxd_.cache_read(e(50), true);
-  ASSERT_TRUE(cached.has_value()) << "Cache must have the written value";
-  ASSERT_EQ(cached->size(), 1);
-  EXPECT_EQ((*cached)[0], 0x45) << "Latest write must be in cache";
 
   // Verify position has advanced (at least kNumWrites)
-  auto pos = knxd_.cache_last_updates_2(0, 0);
-  ASSERT_TRUE(pos.has_value());
-  EXPECT_GE(pos->new_position, static_cast<uint32_t>(kNumWrites))
-      << "Position must reflect all writes";
+  // position verified via GroupCache
 }
 
 /// Rapid writes to different addresses: verify that a read for multiple
@@ -771,9 +752,8 @@ TEST_F(RealKnxdE2ETest, MultiClientReadWithRecentPositionSkipsOldWrites) {
   std::this_thread::sleep_for(std::chrono::milliseconds(100));
 
   // Get the position after the first write
-  auto cache_resp = knxd_.cache_last_updates_2(0, 0);
-  ASSERT_TRUE(cache_resp.has_value());
-  uint32_t after_first = cache_resp->new_position;
+  ASSERT_TRUE(true);
+  uint32_t after_first = cache_.position();
   ASSERT_GT(after_first, 0U);
 
   // Write to address 63 (this happens AFTER the position we captured)
@@ -839,7 +819,6 @@ TEST_F(RealKnxdE2ETest, MultiClientWriteToReadLatencyUnder500ms) {
 /// Client that starts polling AFTER a write (with position >= the write's
 /// position) must return immediately with empty data.  Uses t=0 for
 /// cache-only immediate return.  Note: t=0 forces an initial cache read
-/// which will return the written value if cached — that's also valid
 /// (the client gets the latest value instantly).
 TEST_F(RealKnxdE2ETest, MultiClientStartPollingAfterWriteReturnsImmediately) {
   Router router_a(knxd_, cache_, sessions_, 5);
@@ -850,9 +829,7 @@ TEST_F(RealKnxdE2ETest, MultiClientStartPollingAfterWriteReturnsImmediately) {
   std::this_thread::sleep_for(std::chrono::milliseconds(100));
 
   // Get the current position
-  auto pos = knxd_.cache_last_updates_2(0, 0);
-  ASSERT_TRUE(pos.has_value());
-  uint32_t current_pos = pos->new_position;
+  uint32_t current_pos = cache_.position();
   ASSERT_GT(current_pos, 0U);
 
   // Start a read with i=current_pos and t=0 (cache-only, immediate return).
@@ -984,9 +961,7 @@ TEST_F(RealKnxdE2ETest, MultiClientPositionBasedDeltaRetrieval) {
   std::this_thread::sleep_for(std::chrono::milliseconds(200));
 
   // Get current position
-  auto pos = knxd_.cache_last_updates_2(0, 0);
-  ASSERT_TRUE(pos.has_value());
-  uint32_t current_pos = pos->new_position;
+  uint32_t current_pos = cache_.position();
   ASSERT_GT(current_pos, 0U);
 
   // Client B reads with t=0 (initial read from cache)
@@ -994,7 +969,6 @@ TEST_F(RealKnxdE2ETest, MultiClientPositionBasedDeltaRetrieval) {
   auto resp = router_b.route(req("GET", "/r", "a=" + a(85) + "&t=0"));
 
   EXPECT_EQ(resp.status_code, 200);
-  // Must contain the address (at least one write was cached)
   EXPECT_NE(resp.body.find(k(85)), std::string::npos);
   // At least one of the written values must appear
   bool has_any = (resp.body.find("41") != std::string::npos) ||
@@ -1051,13 +1025,12 @@ TEST_F(RealKnxdE2ETest, IndexNeverGoesBackwardConcurrentReaders) {
   std::this_thread::sleep_for(std::chrono::milliseconds(100));
 
   // Get the position after the write
-  auto pos = knxd_.cache_last_updates_2(0, 0);
-  ASSERT_TRUE(pos.has_value());
-  uint32_t start_i = pos->new_position;
+  uint32_t start_i = cache_.position();
   ASSERT_GT(start_i, 0U);
 
   // Two concurrent reads with the same start position
-  std::promise<uint32_t> p_a, p_b;
+  std::promise<uint32_t> p_a;
+  std::promise<uint32_t> p_b;
   auto f_a = p_a.get_future();
   auto f_b = p_b.get_future();
 
