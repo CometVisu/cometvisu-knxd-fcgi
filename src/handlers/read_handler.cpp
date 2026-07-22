@@ -36,6 +36,7 @@
 #include <string>
 #include <vector>
 
+#include "knxd/knxd_client.h"
 #include "knxd/knxd_protocol.h"
 #include "state/session_store.h"
 #include "state/shared_group_cache.h"
@@ -45,8 +46,12 @@
 
 namespace cvknxd {
 
-ReadHandler::ReadHandler(SharedGroupCache& cache, SessionStore& sessions, int longpoll_timeout_sec)
-    : cache_(cache), sessions_(sessions), longpoll_timeout_sec_(longpoll_timeout_sec) {}
+ReadHandler::ReadHandler(SharedGroupCache& cache, KnxdClientInterface& knxd, SessionStore& sessions,
+                         int longpoll_timeout_sec)
+    : cache_(cache),
+      knxd_(knxd),
+      sessions_(sessions),
+      longpoll_timeout_sec_(longpoll_timeout_sec) {}
 
 std::optional<int> ReadHandler::parse_timeout(std::string_view t_str) {
   if (t_str.empty()) {
@@ -167,6 +172,21 @@ ReadResult ReadHandler::handle(std::string_view query_string) {
       }
     }
     lastpos = cache_.position();
+  }
+
+  // ---- t=0: send GroupValueRead for uncached addresses ----
+  // Per spec, t=0 means "read from bus NOW" — for any address not in the cache,
+  // issue a GroupValueRead telegram.  The response arrives asynchronously and is
+  // handled like a normal bus write by the cache reader process.  The response
+  // to THIS request is returned immediately (non-blocking).
+  if (t_provided && t_original == 0) {
+    // Build GroupValueRead APDU: [0x00, 0x00] = A_GroupValue_Read
+    const std::vector<uint8_t> read_apdu = {0x00, 0x00};
+    for (auto addr : eib_addrs) {
+      if (!already_written.contains(addr)) {
+        knxd_.send_group_packet(addr, read_apdu);
+      }
+    }
   }
 
   // ---- Poll loop — wait on shared condition variable, query delta ----

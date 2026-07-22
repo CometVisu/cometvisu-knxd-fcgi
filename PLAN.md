@@ -79,7 +79,9 @@ using the **eibd client binary protocol**.
 - Timeout semantics:
   - Omitted → long-poll (COMET): hold connection via **poll()** on knxd fd,
     zero-CPU wait until data arrives or configurable timeout expires
-  - `t=0` → read from bus NOW (blocking read via knxd cache)
+  - `t=0` → read from bus NOW: returns cached data immediately (non-blocking),
+    and sends GroupValueRead for any address not in the cache.  Read-responses
+    arrive asynchronously via the cache reader process.
   - `t>0` → return cached data ≤ `t` seconds old; if none, read bus
   - `t<0` → return cached data only, never read bus
 - Response: `{"d":{"ADDRESS":VALUE,...},"i":"INDEX"}`

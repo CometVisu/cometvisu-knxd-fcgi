@@ -22,7 +22,7 @@ add_test(NAME test_knxd_client COMMAND test_knxd_client)
 add_executable(test_read_handler
     test_read_handler.cpp
 )
-target_link_libraries(test_read_handler PRIVATE cvknxd_handlers cvknxd_state GTest::gtest GTest::gtest_main)
+target_link_libraries(test_read_handler PRIVATE cvknxd_handlers cvknxd_knxd cvknxd_state cvknxd_mocks GTest::gtest GTest::gtest_main)
 add_test(NAME test_read_handler COMMAND test_read_handler)
 
 add_executable(test_write_handler
