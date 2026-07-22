@@ -55,9 +55,10 @@
 #include "knxd/knxd_connector.h"
 #include "knxd/knxd_protocol.h"
 #include "router/router.h"
-#include "state/group_cache.h"
 #include "state/session_store.h"
+#include "state/shared_group_cache.h"
 #include "util/debug_log.h"
+#include "util/hex.h"
 #include "version.h"
 
 namespace {
@@ -272,31 +273,46 @@ int main(int argc, char* argv[]) {
     }
   }
 
-  // ---- Connect to knxd with retry ----
-  // First-time connection (has_worked_before=false): retry after 500ms, 1s, 2s.
-  // If the connection was previously successful (reconnect), extended retries
-  // at 4s and 8s are also attempted.
-  KnxdClient knxd;
-  if (!connect_knxd_with_retry(knxd, knxd_socket, false)) {
+  // ---- Create shared group cache (in mmap'd shared memory) ----
+  // All worker processes access this single cache.  A dedicated cache reader
+  // process drains the single knxd group socket and pushes telegrams here.
+  // The process-shared mutex and condition variable provide synchronization
+  // and zero-CPU wakeup for long-poll readers.
+  SharedGroupCache shared_cache;
+  if (!shared_cache.create()) {
+    std::cerr << "[ERROR] Failed to create shared group cache\n";
+    return 1;
+  }
+  std::cout << "[INFO] Shared group cache created (" << shared_cache.region_size()
+            << " bytes, capacity=" << kSharedCacheCapacity << ")\n";
+
+  // ---- Connect to knxd with retry (parent's connection) ----
+  // The parent's knxd connection is used ONLY for the first connection test.
+  // The cache reader opens its own connection; workers open write-only connections.
+  KnxdClient knxd_parent;
+  if (!connect_knxd_with_retry(knxd_parent, knxd_socket, false)) {
     std::cerr << "[ERROR] Cannot connect to knxd at " << knxd_socket << " after all retries\n";
     return 1;
   }
 
-  // Open group socket for sending and receiving
-  if (!knxd.open_group_socket(false)) {
+  // Verify group socket capability, then disconnect — the parent doesn't
+  // need a persistent connection.
+  if (!knxd_parent.open_group_socket(false)) {
     std::cerr << "[ERROR] Cannot open group socket on knxd\n";
-    knxd.disconnect();
+    knxd_parent.disconnect();
     return 1;
   }
-
-  // Set non-blocking mode for efficient poll()-based long-poll
-  knxd.set_nonblocking(true);
+  knxd_parent.set_nonblocking(true);
+  knxd_parent.disconnect();
+  std::cout << "[INFO] knxd connection verified at " << knxd_socket << "\n";
 
   SessionStore sessions;
-  GroupCache cache;  // local cache for group telegrams (eibread-cgi style)
 
-  // ---- Create router ----
-  Router router(knxd, cache, sessions, longpoll_timeout, base_url != nullptr ? base_url : "");
+  // ---- Create router (will be used by worker processes) ----
+  // The knxd reference is for writes only — workers reconnect it as write-only.
+  KnxdClient knxd_writer;
+  Router router(knxd_writer, shared_cache, sessions, longpoll_timeout,
+                base_url != nullptr ? base_url : "");
 
   // Register the request handler on the FCGI server
   server.set_handler([&](const FcgiRequest& req) -> FcgiResponse { return router.route(req); });
@@ -361,6 +377,74 @@ int main(int argc, char* argv[]) {
     std::vector<pid_t> worker_pids;
     worker_pids.reserve(static_cast<size_t>(num_workers));
 
+    // ---- Cache reader process ----
+    // A dedicated child process that drains the single knxd group socket
+    // and pushes telegrams into the shared cache.  Workers only open
+    // write-only knxd connections — all group telegram reception goes
+    // through this single cache reader.
+    {
+      pid_t reader_pid = ::fork();
+      if (reader_pid < 0) {
+        std::cerr << "[ERROR] fork() for cache reader failed: " << std::strerror(errno) << "\n";
+        return 1;
+      }
+
+      if (reader_pid == 0) {
+        // ================================================
+        // Cache reader child process
+        // ================================================
+        ::prctl(PR_SET_PDEATHSIG, SIGTERM);
+        (void)::signal(SIGTERM, SIG_DFL);
+
+        // Close inherited FCGI resources — cache reader doesn't handle HTTP.
+        if (server.is_listening()) {
+          server.close_listen_socket();
+        }
+
+        // Open own knxd connection for reading group telegrams.
+        KnxdClient reader_knxd;
+        if (!connect_knxd_with_retry(reader_knxd, knxd_socket, true)) {
+          std::cerr << "[ERROR] Cache reader pid=" << ::getpid() << ": Cannot connect to knxd\n";
+          std::_Exit(1);
+        }
+        if (!reader_knxd.open_group_socket(false)) {
+          std::cerr << "[ERROR] Cache reader pid=" << ::getpid() << ": Cannot open group socket\n";
+          std::_Exit(2);
+        }
+        reader_knxd.set_nonblocking(true);
+
+        std::cout << "[INFO] Cache reader ready, pid=" << ::getpid() << "\n";
+
+        // Main loop: poll knxd group socket, push telegrams to shared cache.
+        while (g_shutdown_requested == 0) {
+          auto activity = reader_knxd.wait_for_activity(1000);
+          if (activity == KnxdClientInterface::WaitResult::Timeout) {
+            continue;  // check shutdown flag
+          }
+
+          uint16_t addr = 0;
+          std::vector<uint8_t> apdu;
+          while (reader_knxd.poll_group_telegram(addr, apdu)) {
+            ApduType apdu_type{};
+            std::vector<uint8_t> value_data;
+            if (!parse_apdu(apdu, apdu_type, value_data) || apdu_type == ApduType::Read) {
+              continue;
+            }
+            shared_cache.push(addr, value_data);
+            DebugLog::knxd_recv("cache_push", KnxGroupAddress::from_eibaddr(addr).to_string(),
+                                hex_encode(value_data.data(), value_data.size()));
+          }
+        }
+
+        std::cout << "[INFO] Cache reader shutting down\n";
+        reader_knxd.disconnect();
+        std::_Exit(0);
+      }
+
+      // Parent records the cache reader PID (tracked separately, not in worker_pids).
+      std::cout << "[INFO] Started cache reader pid=" << reader_pid << "\n";
+    }
+
     bool fork_failed = false;
     int fork_errno = 0;
 
@@ -376,59 +460,42 @@ int main(int argc, char* argv[]) {
 
       if (pid == 0) {
         // ================================================
-        // Child process — worker
+        // Worker child process
         // ================================================
-
-        // Ensure this child dies if the parent dies unexpectedly.
-        // Without this, orphaned children would keep running indefinitely,
-        // holding the FCGI listen socket open and accepting connections
-        // with no supervision — a resource leak on embedded systems.
         ::prctl(PR_SET_PDEATHSIG, SIGTERM);
-
-        // Reset SIGTERM to default in the child so that the PDEATHSIG
-        // above actually terminates us (the parent's handler just sets
-        // a flag, which the child's accept loop never checks).
         (void)::signal(SIGTERM, SIG_DFL);
 
-        // Close the inherited knxd connection.  Each worker
-        // opens its own to avoid contention on the shared fd.
-        knxd.disconnect();
-
-        // The parent successfully connected to knxd, so use extended retry delays
-        // (500ms, 1s, 2s, 4s, 8s) in case knxd is temporarily unavailable.
-        if (!connect_knxd_with_retry(knxd, knxd_socket, true)) {
+        // The parent successfully connected to knxd, so use extended retry delays.
+        // Workers use write-only group sockets — the cache reader handles all
+        // group telegram reception.
+        if (!connect_knxd_with_retry(knxd_writer, knxd_socket, true)) {
           std::cerr << "[ERROR] Worker pid=" << ::getpid() << " (worker " << i
                     << "): Cannot connect to knxd at " << knxd_socket << " after all retries\n";
           std::_Exit(1);
         }
 
-        if (!knxd.open_group_socket(false)) {
+        if (!knxd_writer.open_group_socket(true)) {
           std::cerr << "[ERROR] Worker pid=" << ::getpid() << " (worker " << i
-                    << "): Cannot open group socket " << "on knxd at " << knxd_socket
+                    << "): Cannot open group socket on knxd at " << knxd_socket
                     << " (check knxd is running and accessible)\n";
           std::_Exit(2);
         }
 
-        knxd.set_nonblocking(true);
         std::cout << "[INFO] Worker " << i << " ready, pid=" << ::getpid() << "\n";
 
-        // Run the accept loop.  Blocks until the listen socket is
-        // shut down (by parent SIGTERM).
         int child_result = server.run();
-        knxd.disconnect();
+        knxd_writer.disconnect();
         std::_Exit(child_result);
       }
 
-      // Parent continues: record the child PID
       worker_pids.push_back(pid);
       std::cout << "[INFO] Started worker " << i << "/" << num_workers << " pid=" << pid << "\n";
     }
 
     // ---- Parent: close inherited resources ----
     // The parent process does not handle FCGI requests — it only waits for
-    // children to exit.  Close the knxd connection now so we don't waste a
-    // connection slot and don't interfere with the children's connections.
-    knxd.disconnect();
+    // children to exit.  The knxd_parent was already disconnected above.
+    // knxd_writer is per-worker (each child reconnects its own copy).
 
     // Close the listen socket in the parent. The children inherited it
     // via fork(), so it stays open for them. The parent doesn't need it
@@ -517,7 +584,6 @@ int main(int argc, char* argv[]) {
   }
 
   // Cleanup
-  knxd.disconnect();
-
+  // knxd_parent was already disconnected above; knxd_writer is per-worker.
   return result;
 }

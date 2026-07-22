@@ -15,22 +15,21 @@
 
 /**
  * @file read_handler.h
- * @brief CometVisu read endpoint handler — cache reads and COMET long-poll.
+ * @brief CometVisu read endpoint handler — shared cache and COMET long-poll.
  *
  * Implements the equivalent of the reference eibread-cgi.c's main loop:
  * subscribes to addresses, reads cached values on first request, then
- * polls for changes via EIB_CACHE_LAST_UPDATES_2.
+ * blocks waiting for new data via the shared cache's condition variable.
  *
- * Like the reference, maintains a local GroupCache updated from group
- * socket APDU_PACKET telegrams.  This avoids round-trips to knxd's
- * built-in cache for every value lookup, and ensures /w writes are
- * immediately visible to blocked /r readers — the group socket echo
- * updates GroupCache before the cache_last_updates_2 position arrives.
+ * The shared cache (SharedGroupCache) is populated by a dedicated cache
+ * reader process that drains the single knxd group socket.  Workers query
+ * the cache directly — no per-worker knxd group socket needed.  This
+ * ensures a single, authoritative position counter (`i`) across all
+ * workers, preventing duplicate delivery and non-monotonic index bugs.
  *
  * Key differences from eibread-cgi:
- *   - Uses cache_last_updates_2 (32-bit position) instead of the older
- *     cache_last_updates (16-bit).  This avoids position wrap-around on
- *     busy installations.
+ *   - Uses a shared-memory cache with process-shared mutex/condvar
+ *     instead of per-process caches or knxd's built-in cache.
  *   - Does NOT send GroupValueRead on cache miss — flooding knxd's tunnel
  *     with read requests causes "Link down, terminating" on busy systems.
  */
@@ -46,7 +45,7 @@ namespace cvknxd {
 
 class KnxdClientInterface;
 class SessionStore;
-class GroupCache;
+class SharedGroupCache;
 
 /**
  * @brief Result of a read operation (GET /r).
@@ -68,7 +67,8 @@ struct ReadResult {
  *
  * Maintains a local GroupCache (like the reference eibread-cgi) updated
  * from APDU_PACKET telegrams on the group socket.  The authoritative
- * position (`i`) always comes from knxd's cache_last_updates_2.
+ * position (`i`) always comes from the shared cache's position counter,
+ * which is monotonically increasing across all worker processes.
  *
  * Three KNX semantic correctness rules are enforced (see AGENTS.md):
  *   -# No duplicate delivery — values are deduplicated within a response.
@@ -77,8 +77,7 @@ struct ReadResult {
  */
 class ReadHandler {
 public:
-  ReadHandler(KnxdClientInterface& knxd, GroupCache& cache, SessionStore& sessions,
-              int longpoll_timeout_sec = 300);
+  ReadHandler(SharedGroupCache& cache, SessionStore& sessions, int longpoll_timeout_sec = 300);
 
   ~ReadHandler() = default;
 
@@ -94,9 +93,8 @@ public:
   [[nodiscard]] ReadResult handle(std::string_view query_string);
 
 private:
-  KnxdClientInterface& knxd_;  // NOLINT
-  GroupCache& cache_;          // NOLINT — local cache for group telegrams
-  SessionStore& sessions_;     // NOLINT
+  SharedGroupCache& cache_;  // NOLINT — shared cache for group telegrams
+  SessionStore& sessions_;   // NOLINT
   int longpoll_timeout_sec_;
 
   [[nodiscard]] static std::optional<int> parse_timeout(std::string_view t_str);

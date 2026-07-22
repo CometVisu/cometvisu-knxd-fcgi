@@ -91,3 +91,9 @@ add_executable(test_group_cache
 )
 target_link_libraries(test_group_cache PRIVATE cvknxd_state GTest::gtest GTest::gtest_main)
 add_test(NAME test_group_cache COMMAND test_group_cache)
+
+add_executable(test_shared_group_cache
+    test_shared_group_cache.cpp
+)
+target_link_libraries(test_shared_group_cache PRIVATE cvknxd_state GTest::gtest GTest::gtest_main)
+add_test(NAME test_shared_group_cache COMMAND test_shared_group_cache)

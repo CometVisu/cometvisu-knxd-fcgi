@@ -27,7 +27,7 @@
 #include "knxd/knxd_protocol.h"
 #include "router/router.h"
 #include "state/session_store.h"
-#include "state/group_cache.h"
+#include "state/shared_group_cache.h"
 
 using namespace cvknxd;
 
@@ -47,6 +47,7 @@ using namespace cvknxd;
 class RealKnxdE2ETest : public ::testing::Test {
 protected:
   void SetUp() override {
+    ASSERT_TRUE(cache_.create());
     const char* socket = std::getenv("KNXD_SOCKET");
     // NOLINTNEXTLINE(cppcoreguidelines-pro-bounds-pointer-arithmetic)
     knxd_socket_path_ = (socket != nullptr && socket[0] != '\0') ? socket : "/tmp/knxd-ipt";
@@ -153,7 +154,7 @@ protected:
   std::string knxd_socket_path_;
   KnxdClient knxd_;
   SessionStore sessions_;
-  GroupCache cache_;
+  SharedGroupCache cache_;
   uint16_t base_ = 0x1000;
   // NOLINTEND(misc-non-private-member-variables-in-classes)
 };
