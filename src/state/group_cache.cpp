@@ -15,37 +15,50 @@
 
 #include "group_cache.h"
 
-#include <utility>
-
 namespace cvknxd {
 
-void GroupCache::update(uint16_t addr, std::vector<uint8_t> value) {
+void GroupCache::push(uint16_t addr, const std::vector<uint8_t>& value) {
   std::lock_guard<std::mutex> lock(mutex_);
-  entries_[addr] = std::move(value);
+  entries_[addr] = {value, static_cast<uint32_t>(std::time(nullptr))};
+  position_.fetch_add(1);
 }
 
-std::optional<std::vector<uint8_t>> GroupCache::get(uint16_t addr) const {
+std::optional<std::vector<uint8_t>> GroupCache::get(uint16_t addr,
+                                                    int max_age_sec) const {
   std::lock_guard<std::mutex> lock(mutex_);
   auto it = entries_.find(addr);
-  if (it != entries_.end()) {
-    return it->second;
+  if (it == entries_.end()) return std::nullopt;
+  if (max_age_sec >= 0) {
+    uint32_t now = static_cast<uint32_t>(std::time(nullptr));
+    if (now - it->second.timestamp >= static_cast<uint32_t>(max_age_sec))
+      return std::nullopt;
   }
-  return std::nullopt;
+  return it->second.value;
+}
+
+GroupCache::Delta GroupCache::get_delta(uint32_t since_pos,
+                                        const std::set<uint16_t>& subscribed,
+                                        int max_age_sec) const {
+  std::lock_guard<std::mutex> lock(mutex_);
+  Delta delta;
+  delta.position = position_.load();
+  if (delta.position <= since_pos) return delta;
+  uint32_t now = static_cast<uint32_t>(std::time(nullptr));
+  for (auto addr : subscribed) {
+    auto it = entries_.find(addr);
+    if (it == entries_.end()) continue;
+    if (max_age_sec >= 0 &&
+        now - it->second.timestamp >= static_cast<uint32_t>(max_age_sec))
+      continue;
+    delta.values[addr] = it->second.value;
+  }
+  return delta;
 }
 
 void GroupCache::clear() {
   std::lock_guard<std::mutex> lock(mutex_);
   entries_.clear();
-}
-
-size_t GroupCache::size() const {
-  std::lock_guard<std::mutex> lock(mutex_);
-  return entries_.size();
-}
-
-bool GroupCache::contains(uint16_t addr) const {
-  std::lock_guard<std::mutex> lock(mutex_);
-  return entries_.contains(addr);
+  position_.store(0);
 }
 
 }  // namespace cvknxd
