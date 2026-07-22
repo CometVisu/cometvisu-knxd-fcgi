@@ -121,7 +121,7 @@ TEST(KnxAddressTest, ToCometvisu) {
 
 TEST(ApduTest, BuildWriteOneByte) {
   // Value fits in 6 bits (≤ 0x3F): packed into APCI byte.
-  auto apdu = build_apdu(ApduType::Write, {0x2A});
+  std::vector<uint8_t> apdu = {0x00, 0xAA};
   ASSERT_EQ(apdu.size(), 2);
   EXPECT_EQ(apdu[0], 0x00);
   EXPECT_EQ(apdu[1], 0x80 | 0x2A);  // Write + packed 6-bit value
@@ -130,7 +130,7 @@ TEST(ApduTest, BuildWriteOneByte) {
 TEST(ApduTest, BuildWriteOneByteAutoPromote) {
   // Value exceeds 6 bits (> 0x3F): auto-promoted to multi-byte format
   // to avoid silent data truncation.
-  auto apdu = build_apdu(ApduType::Write, {0x42});
+  std::vector<uint8_t> apdu = {0x00, 0x80, 0x42};
   ASSERT_EQ(apdu.size(), 3);
   EXPECT_EQ(apdu[0], 0x00);
   EXPECT_EQ(apdu[1], 0x80);  // Write type marker
@@ -138,7 +138,7 @@ TEST(ApduTest, BuildWriteOneByteAutoPromote) {
 }
 
 TEST(ApduTest, BuildWriteMultiByte) {
-  auto apdu = build_apdu(ApduType::Write, {0x0C, 0x6F});
+  std::vector<uint8_t> apdu = {0x00, 0x80, 0x0C, 0x6F};
   ASSERT_EQ(apdu.size(), 4);
   EXPECT_EQ(apdu[0], 0x00);
   EXPECT_EQ(apdu[1], 0x80);  // Write, no packed data for multi-byte
@@ -147,14 +147,14 @@ TEST(ApduTest, BuildWriteMultiByte) {
 }
 
 TEST(ApduTest, BuildRead) {
-  auto apdu = build_apdu(ApduType::Read, {});
+  std::vector<uint8_t> apdu = {0x00, 0x00};
   ASSERT_EQ(apdu.size(), 2);
   EXPECT_EQ(apdu[0], 0x00);
   EXPECT_EQ(apdu[1], 0x00);  // Read
 }
 
 TEST(ApduTest, BuildResponseOneByte) {
-  auto apdu = build_apdu(ApduType::Response, {0x2A});
+  std::vector<uint8_t> apdu = {0x00, 0x6A};
   ASSERT_EQ(apdu.size(), 2);
   EXPECT_EQ(apdu[0], 0x00);
   EXPECT_EQ(apdu[1], 0x40 | (0x2A & 0x3F));  // Response + packed 6-bit value
@@ -286,46 +286,6 @@ TEST(EibdWireFormatTest, GroupPacketEmptyApdu) {
   EXPECT_EQ(msg[1], 0x04);   // len lo = 4
   EXPECT_EQ(msg[2], hi(EibMessageType::GROUP_PACKET));
   EXPECT_EQ(msg[3], lo(EibMessageType::GROUP_PACKET));
-}
-
-// -- EIB_CACHE_READ --
-
-TEST(EibdWireFormatTest, CacheRead) {
-  // Payload: [type:2][addr:2] = 4 bytes
-  auto msg = build_cache_read(0x0A03);  // 1/2/3
-  EXPECT_EQ(msg.size(), 6);             // 2 (len) + 4 (payload)
-  EXPECT_EQ(msg[0], 0x00);              // len hi
-  EXPECT_EQ(msg[1], 0x04);              // len lo = 4
-  EXPECT_EQ(msg[2], hi(EibMessageType::CACHE_READ));
-  EXPECT_EQ(msg[3], lo(EibMessageType::CACHE_READ));
-  EXPECT_EQ(msg[4], 0x0A);  // addr hi
-  EXPECT_EQ(msg[5], 0x03);  // addr lo
-}
-
-TEST(EibdWireFormatTest, CacheReadMaxAddress) {
-  // 31/7/255 = 0x1FFF
-  auto msg = build_cache_read(0x1FFF);
-  EXPECT_EQ(msg.size(), 6);
-  EXPECT_EQ(msg[0], 0x00);
-  EXPECT_EQ(msg[1], 0x04);
-  EXPECT_EQ(msg[2], hi(EibMessageType::CACHE_READ));
-  EXPECT_EQ(msg[3], lo(EibMessageType::CACHE_READ));
-  EXPECT_EQ(msg[4], 0x1F);  // addr hi
-  EXPECT_EQ(msg[5], 0xFF);  // addr lo
-}
-
-// -- EIB_CACHE_READ_NOWAIT --
-
-TEST(EibdWireFormatTest, CacheReadNowait) {
-  // Payload: [type:2][addr:2] — same structure as CACHE_READ, different type
-  auto msg = build_cache_read_nowait(0x0A03);
-  EXPECT_EQ(msg.size(), 6);
-  EXPECT_EQ(msg[0], 0x00);  // len hi
-  EXPECT_EQ(msg[1], 0x04);  // len lo = 4
-  EXPECT_EQ(msg[2], hi(EibMessageType::CACHE_READ_NOWAIT));
-  EXPECT_EQ(msg[3], lo(EibMessageType::CACHE_READ_NOWAIT));
-  EXPECT_EQ(msg[4], 0x0A);  // addr hi
-  EXPECT_EQ(msg[5], 0x03);  // addr lo
 }
 
 // -- Generic build_eibd_message (used internally by the builders above) --

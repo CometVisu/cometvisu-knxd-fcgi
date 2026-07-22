@@ -185,36 +185,3 @@ TEST_F(KnxdClientTest, OperationsWorkAfterReconnect) {
 
 // ================================================================
 // Transformed cache tests → GroupCache tests
-// Cache read/write intent preserved; GroupCache is the authority
-// ================================================================
-
-TEST_F(KnxdClientTest, GroupCacheSurvivesReconnect) {
-  // Original: CacheReadWorksAfterReconnect — cache data survives reconnect
-  // New: GroupCache is per-process, naturally survives reconnect
-  GroupCache cache;
-  cache.push(0x0A03, {0x42});
-  ASSERT_TRUE(client_.connect("/run/knx"));
-  EXPECT_TRUE(client_.reconnect());
-  auto val = cache.get(0x0A03);
-  ASSERT_TRUE(val.has_value());
-  EXPECT_EQ((*val)[0], 0x42);
-}
-
-TEST_F(KnxdClientTest, GroupCachePositionSurvivesReconnect) {
-  // Original: CacheLastUpdatesWorksAfterReconnect — position survives
-  GroupCache cache;
-  cache.push(0x0A03, {0x42});
-  ASSERT_TRUE(client_.connect("/run/knx"));
-  EXPECT_TRUE(client_.reconnect());
-  EXPECT_EQ(cache.position(), 1);
-}
-
-TEST_F(KnxdClientTest, GroupCachePositionAdvancesOnPush) {
-  // Original: CacheRead/CacheLastUpdates — verify position tracking
-  GroupCache cache;
-  EXPECT_EQ(cache.position(), 0);
-  cache.push(0x0A03, {0x42});
-  EXPECT_EQ(cache.position(), 1);
-  cache.push(0x0B04, {0x01});
-  EXPECT_EQ(cache.position(), 2);
-}

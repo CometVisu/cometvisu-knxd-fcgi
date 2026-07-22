@@ -119,12 +119,6 @@ enum class ApduType : uint8_t {
   Write = 0x80,     // A_GroupValue_Write
 };
 
-/// Build an APDU (Application Protocol Data Unit) for a group value.
-/// @param type The APCI type (Read/Response/Write).
-/// @param data The payload bytes.
-/// @return Encoded APDU bytes ready for transmission.
-[[nodiscard]] std::vector<uint8_t> build_apdu(ApduType type, const std::vector<uint8_t>& data);
-
 /// Parse a received APDU.
 /// @param apdu Raw APDU bytes (starting with the 2-byte APDU header).
 /// @param out_type Output: the APCI type.
@@ -144,11 +138,6 @@ namespace EibMessageType {
 inline constexpr uint16_t OPEN_GROUPCON = EIB_OPEN_GROUPCON;
 inline constexpr uint16_t GROUP_PACKET = EIB_GROUP_PACKET;
 inline constexpr uint16_t APDU_PACKET = EIB_APDU_PACKET;
-inline constexpr uint16_t OPEN_T_GROUP = EIB_OPEN_T_GROUP;
-inline constexpr uint16_t CACHE_READ = EIB_CACHE_READ;
-inline constexpr uint16_t CACHE_READ_NOWAIT = EIB_CACHE_READ_NOWAIT;
-inline constexpr uint16_t CACHE_LAST_UPDATES = EIB_CACHE_LAST_UPDATES;
-inline constexpr uint16_t CACHE_LAST_UPDATES_2 = EIB_CACHE_LAST_UPDATES_2;
 }  // namespace EibMessageType
 
 /// Build a complete eibd wire message.
@@ -172,41 +161,6 @@ inline constexpr uint16_t CACHE_LAST_UPDATES_2 = EIB_CACHE_LAST_UPDATES_2;
 /// @return Complete wire-format message ready to send.
 [[nodiscard]] std::vector<uint8_t> build_group_packet(uint16_t group_addr,
                                                       const std::vector<uint8_t>& apdu);
-
-/// Build an EIB_CACHE_READ wire message.
-/// Payload: [type:2][addr:2].
-/// @param group_addr 16-bit EIB group address to read from cache.
-/// @return Complete wire-format message ready to send.
-[[nodiscard]] std::vector<uint8_t> build_cache_read(uint16_t group_addr);
-
-/// Build an EIB_CACHE_READ_NOWAIT wire message.
-/// Payload: [type:2][addr:2].
-/// @param group_addr 16-bit EIB group address to read from cache (non-blocking).
-/// @return Complete wire-format message ready to send.
-[[nodiscard]] std::vector<uint8_t> build_cache_read_nowait(uint16_t group_addr);
-
-/// Build an EIB_CACHE_LAST_UPDATES_2 wire message.
-/// Payload: [type:2][start:4][timeout:2].
-/// Uses 32-bit position counters (unlike v1 which uses 16-bit).
-/// @param start The starting position (only updates after this are returned).
-/// @param timeout_sec How long to wait for updates (seconds, 0 = return immediately).
-/// @return Complete wire-format message ready to send.
-[[nodiscard]] std::vector<uint8_t> build_cache_last_updates_2(uint32_t start, int timeout_sec);
-
-/// Result of a CACHE_LAST_UPDATES_2 response.
-struct LastUpdatesResult {
-  /// Group addresses that changed since the start position.
-  std::vector<uint16_t> changed_addresses;
-  /// New end position (pass this as "start" in the next call).
-  uint32_t new_position = 0;
-};
-
-/// Parse an EIB_CACHE_LAST_UPDATES_2 response.
-/// Response payload: [end:4][addrs:N*2]
-/// @param data Raw payload data (after the 2-byte type).
-/// @return Parsed result, or std::nullopt if the data is malformed.
-[[nodiscard]] std::optional<LastUpdatesResult> parse_cache_last_updates_2_response(
-    const std::vector<uint8_t>& data);
 
 /// Parse a received eibd wire message.
 /// @param raw Raw bytes received from socket.
