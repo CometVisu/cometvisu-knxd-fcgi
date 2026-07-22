@@ -14,6 +14,7 @@
 // along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
 #include <gtest/gtest.h>
+
 #include <atomic>
 #include <thread>
 
@@ -28,7 +29,7 @@ protected:
     ASSERT_TRUE(client_.connect("/run/knx"));
     ASSERT_TRUE(client_.open_group_socket(false));
   }
-  MockKnxdClient client_;
+  MockKnxdClient client_;  // NOLINT(misc-non-private-member-variables-in-classes)
 };
 
 /// send_group_packet and wait_for_activity can run concurrently.
@@ -39,7 +40,8 @@ TEST_F(KnxdClientConcurrencyTest, SendAndWaitConcurrently) {
     auto r = client_.wait_for_activity(10);
     EXPECT_EQ(r, KnxdClient::WaitResult::Timeout);
   });
-  while (!started.load()) {}
+  while (!started.load()) {
+  }
   // Send while waiter is blocked
   (void)client_.send_group_packet(0x0A03, {0x00, 0x80, 0x42});
   waiter.join();
@@ -47,8 +49,7 @@ TEST_F(KnxdClientConcurrencyTest, SendAndWaitConcurrently) {
 }
 
 /// Multiple senders can write concurrently.
-TEST_F(KnxdClientConcurrencyTest, SendAndPollConcurrently) {
-}
+TEST_F(KnxdClientConcurrencyTest, SendAndPollConcurrently) {}
 
 /// wait_for_activity returns Timeout when no data is enqueued.
 TEST_F(KnxdClientConcurrencyTest, WaitTimeout) {

@@ -163,7 +163,7 @@ TEST(ApduTest, BuildResponseOneByte) {
 TEST(ApduTest, ParseWriteOneByte) {
   // Single-byte write: type bits 0x80, data in lower 6 bits
   std::vector<uint8_t> apdu = {0x00, 0x80 | (0x2A & 0x3F)};
-  ApduType type;
+  ApduType type = ApduType::Write;
   std::vector<uint8_t> data;
   ASSERT_TRUE(parse_apdu(apdu, type, data));
   EXPECT_EQ(type, ApduType::Write);
@@ -173,7 +173,7 @@ TEST(ApduTest, ParseWriteOneByte) {
 
 TEST(ApduTest, ParseWriteMultiByte) {
   std::vector<uint8_t> apdu = {0x00, 0x80, 0x0C, 0x6F};
-  ApduType type;
+  ApduType type = ApduType::Write;
   std::vector<uint8_t> data;
   ASSERT_TRUE(parse_apdu(apdu, type, data));
   EXPECT_EQ(type, ApduType::Write);
@@ -184,7 +184,7 @@ TEST(ApduTest, ParseWriteMultiByte) {
 
 TEST(ApduTest, ParseRead) {
   std::vector<uint8_t> apdu = {0x00, 0x00};
-  ApduType type;
+  ApduType type = ApduType::Write;
   std::vector<uint8_t> data;
   ASSERT_TRUE(parse_apdu(apdu, type, data));
   EXPECT_EQ(type, ApduType::Read);
@@ -193,7 +193,7 @@ TEST(ApduTest, ParseRead) {
 
 TEST(ApduTest, ParseResponse) {
   std::vector<uint8_t> apdu = {0x00, 0x40 | (0x1A & 0x3F)};
-  ApduType type;
+  ApduType type = ApduType::Write;
   std::vector<uint8_t> data;
   ASSERT_TRUE(parse_apdu(apdu, type, data));
   EXPECT_EQ(type, ApduType::Response);
@@ -307,7 +307,7 @@ TEST(EibdMessageParseTest, ParseGroupPacket) {
   uint8_t t_hi = hi(EibMessageType::GROUP_PACKET);
   uint8_t t_lo = lo(EibMessageType::GROUP_PACKET);
   std::vector<uint8_t> raw = {0x00, 0x04, t_hi, t_lo, 0xAA, 0xBB};
-  uint16_t type;
+  uint16_t type = 0;
   std::vector<uint8_t> data;
   ASSERT_TRUE(parse_eibd_message(raw, type, data));
   EXPECT_EQ(type, EibMessageType::GROUP_PACKET);
@@ -321,7 +321,7 @@ TEST(EibdMessageParseTest, ParseOpenGroupconResponse) {
   uint8_t t_hi = hi(EibMessageType::OPEN_GROUPCON);
   uint8_t t_lo = lo(EibMessageType::OPEN_GROUPCON);
   std::vector<uint8_t> raw = {0x00, 0x02, t_hi, t_lo};
-  uint16_t type;
+  uint16_t type = 0;
   std::vector<uint8_t> data;
   ASSERT_TRUE(parse_eibd_message(raw, type, data));
   EXPECT_EQ(type, EibMessageType::OPEN_GROUPCON);
@@ -330,7 +330,7 @@ TEST(EibdMessageParseTest, ParseOpenGroupconResponse) {
 
 TEST(EibdMessageTest, ParseTooShort) {
   std::vector<uint8_t> raw = {0x00, 0x04, 0x00};  // truncated
-  uint16_t type;
+  uint16_t type = 0;
   std::vector<uint8_t> data;
   EXPECT_FALSE(parse_eibd_message(raw, type, data));
 }

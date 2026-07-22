@@ -127,7 +127,7 @@ TEST_F(KnxdClientTest, ResetClearsState) {
   ASSERT_TRUE(client_.connect("/run/knx"));
   ASSERT_TRUE(client_.open_group_socket(false));
   client_.enqueue_telegram(0x0A03, {0x00, 0x80, 0x42});
-  client_.send_group_packet(0x0B04, {0x00, 0x80, 0x01});
+  (void)client_.send_group_packet(0x0B04, {0x00, 0x80, 0x01});
   client_.reset();
   EXPECT_FALSE(client_.is_connected());
   EXPECT_EQ(client_.sent_packets().size(), 0);
@@ -161,7 +161,8 @@ TEST_F(KnxdClientTest, MultiplePollsDrainAll) {
   uint16_t addr = 0;
   std::vector<uint8_t> apdu;
   int count = 0;
-  while (client_.poll_group_telegram(addr, apdu)) count++;
+  while (client_.poll_group_telegram(addr, apdu))
+    count++;
   EXPECT_EQ(count, 3);
   EXPECT_EQ(client_.get_telegram_count(), 3);
 }

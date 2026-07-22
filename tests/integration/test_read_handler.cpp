@@ -320,8 +320,9 @@ TEST_F(ReadHandlerTest, TimeoutAfterEmptyPollsReturnsEmpty) {
 /// i reflects cache position, not telegram count.
 TEST_F(ReadHandlerTest, IndexComesFromCachePosition) {
   // Pre-populate cache via direct pushes — simulates previous telegrams
-  for (int i = 0; i < 42; ++i)
+  for (int i = 0; i < 42; ++i) {
     cache_.push(0x0A03, {0x42});
+  }
 
   ReadHandler handler(cache_, sessions_);
   auto r = handler.handle("a=1/2/3&i=0");
@@ -543,8 +544,9 @@ public:
 TEST_F(ReadHandlerMultiCacheTest, NonMonotonicIndexAcrossSeparateCaches) {
   // Both "workers" share the same underlying cache (attached in SetUp).
   // Push via cache_a — both views see the same position.
-  for (int i = 0; i < 10; ++i)
+  for (int i = 0; i < 10; ++i) {
     cache_a_.push(0x0A03, {0x42});  // pos 1-10
+  }
 
   ReadHandler handler_a(cache_a_, sessions_);
   auto r_a = handler_a.handle("a=1/2/3&i=0&t=0");
@@ -555,8 +557,9 @@ TEST_F(ReadHandlerMultiCacheTest, NonMonotonicIndexAcrossSeparateCaches) {
   EXPECT_EQ(i_a, 10) << "Position after 10 pushes";
 
   // Push more via cache_b — same shared position advances.
-  for (int i = 0; i < 5; ++i)
+  for (int i = 0; i < 5; ++i) {
     cache_b_.push(0x0A03, {0x99});  // pos 11-15
+  }
 
   // Read via cache_a — sees the new shared position (15)
   ReadHandler handler_a2(cache_a_, sessions_);

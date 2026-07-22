@@ -151,11 +151,11 @@ protected:
   }
 
   // NOLINTBEGIN(misc-non-private-member-variables-in-classes)
-  std::string knxd_socket_path_;
-  KnxdClient knxd_;
-  SessionStore sessions_;
-  SharedGroupCache cache_;
-  uint16_t base_ = 0x1000;
+  std::string knxd_socket_path_;  // NOLINT(misc-non-private-member-variables-in-classes)
+  KnxdClient knxd_;               // NOLINT(misc-non-private-member-variables-in-classes)
+  SessionStore sessions_;         // NOLINT(misc-non-private-member-variables-in-classes)
+  SharedGroupCache cache_;        // NOLINT(misc-non-private-member-variables-in-classes)
+  uint16_t base_ = 0x1000;        // NOLINT(misc-non-private-member-variables-in-classes)
   // NOLINTEND(misc-non-private-member-variables-in-classes)
 };
 
@@ -240,7 +240,6 @@ TEST_F(RealKnxdE2ETest, WriteMultiByteReachesKnxdCache) {
   EXPECT_EQ(wr.status_code, 200);
 
   std::this_thread::sleep_for(std::chrono::milliseconds(100));
-
 }
 
 // ---- Read with timeout — returns 200 (empty on virtual bus) ----

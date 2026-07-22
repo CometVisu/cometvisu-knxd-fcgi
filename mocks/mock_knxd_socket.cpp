@@ -30,12 +30,14 @@ bool MockKnxdClient::connect(std::string_view socket_path) {
 void MockKnxdClient::disconnect() {
   connected_ = false;
   group_socket_open_ = false;
-  while (!telegram_queue_.empty())
+  while (!telegram_queue_.empty()) {
     telegram_queue_.pop();
+  }
 }
 bool MockKnxdClient::reconnect() {
-  if (last_socket_path_.empty())
+  if (last_socket_path_.empty()) {
     return false;
+  }
   connected_ = connection_success_;
   group_socket_open_ = connection_success_;  // auto-reopen
   return connected_;
@@ -43,15 +45,17 @@ bool MockKnxdClient::reconnect() {
 bool MockKnxdClient::is_connected() const {
   return connected_;
 }
-bool MockKnxdClient::open_group_socket(bool) {
-  if (!connected_)
+bool MockKnxdClient::open_group_socket(bool /*write_only*/) {
+  if (!connected_) {
     return false;
+  }
   group_socket_open_ = connection_success_;
   return group_socket_open_;
 }
 bool MockKnxdClient::send_group_packet(uint16_t addr, const std::vector<uint8_t>& apdu) {
-  if (!connected_ || !group_socket_open_)
+  if (!connected_ || !group_socket_open_) {
     return false;
+  }
   if (send_fail_count_ > 0) {
     send_fail_count_--;
     return false;
@@ -59,11 +63,12 @@ bool MockKnxdClient::send_group_packet(uint16_t addr, const std::vector<uint8_t>
   sent_packets_.push_back({addr, apdu});
   return true;
 }
-bool MockKnxdClient::poll_group_telegram(uint16_t& out_addr, std::vector<uint8_t>& out_apdu) {
-  if (telegram_queue_.empty())
+bool MockKnxdClient::poll_group_telegram(uint16_t& out_group_addr, std::vector<uint8_t>& out_apdu) {
+  if (telegram_queue_.empty()) {
     return false;
+  }
   auto& f = telegram_queue_.front();
-  out_addr = f.first;
+  out_group_addr = f.first;
   out_apdu = f.second;
   telegram_queue_.pop();
   telegram_count_++;
@@ -75,8 +80,8 @@ int MockKnxdClient::get_fd() const {
 uint64_t MockKnxdClient::get_telegram_count() const {
   return telegram_count_;
 }
-void MockKnxdClient::set_nonblocking(bool) {}
-KnxdClient::WaitResult MockKnxdClient::wait_for_activity(int) {
+void MockKnxdClient::set_nonblocking(bool /*enable*/) {}
+KnxdClient::WaitResult MockKnxdClient::wait_for_activity(int /*timeout_ms*/) {
   return telegram_queue_.empty() ? WaitResult::Timeout : WaitResult::GroupData;
 }
 void MockKnxdClient::enqueue_telegram(uint16_t addr, const std::vector<uint8_t>& apdu) {
@@ -87,8 +92,9 @@ void MockKnxdClient::reset() {
   group_socket_open_ = false;
   connection_success_ = true;
   last_socket_path_.clear();
-  while (!telegram_queue_.empty())
+  while (!telegram_queue_.empty()) {
     telegram_queue_.pop();
+  }
   sent_packets_.clear();
   telegram_count_ = 0;
   send_fail_count_ = 0;
