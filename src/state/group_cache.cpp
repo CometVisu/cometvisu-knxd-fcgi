@@ -19,36 +19,41 @@ namespace cvknxd {
 
 void GroupCache::push(uint16_t addr, const std::vector<uint8_t>& value) {
   std::lock_guard<std::mutex> lock(mutex_);
-  entries_[addr] = {value, static_cast<uint32_t>(std::time(nullptr))};
-  position_.fetch_add(1);
+  // pushed_at = new position (after increment), so get_delta(pos) returns
+  // entries with pushed_at > pos — i.e. entries that arrived after pos.
+  uint32_t new_pos = position_.fetch_add(1) + 1;
+  entries_[addr] = {value, static_cast<uint32_t>(std::time(nullptr)), new_pos};
 }
 
-std::optional<std::vector<uint8_t>> GroupCache::get(uint16_t addr,
-                                                    int max_age_sec) const {
+std::optional<std::vector<uint8_t>> GroupCache::get(uint16_t addr, int max_age_sec) const {
   std::lock_guard<std::mutex> lock(mutex_);
   auto it = entries_.find(addr);
-  if (it == entries_.end()) return std::nullopt;
+  if (it == entries_.end())
+    return std::nullopt;
   if (max_age_sec >= 0) {
-    uint32_t now = static_cast<uint32_t>(std::time(nullptr));
+    auto now = static_cast<uint32_t>(std::time(nullptr));
     if (now - it->second.timestamp >= static_cast<uint32_t>(max_age_sec))
       return std::nullopt;
   }
   return it->second.value;
 }
 
-GroupCache::Delta GroupCache::get_delta(uint32_t since_pos,
-                                        const std::set<uint16_t>& subscribed,
+GroupCache::Delta GroupCache::get_delta(uint32_t since_pos, const std::set<uint16_t>& subscribed,
                                         int max_age_sec) const {
   std::lock_guard<std::mutex> lock(mutex_);
   Delta delta;
   delta.position = position_.load();
-  if (delta.position <= since_pos) return delta;
+  if (delta.position <= since_pos)
+    return delta;
   uint32_t now = static_cast<uint32_t>(std::time(nullptr));
   for (auto addr : subscribed) {
     auto it = entries_.find(addr);
-    if (it == entries_.end()) continue;
-    if (max_age_sec >= 0 &&
-        now - it->second.timestamp >= static_cast<uint32_t>(max_age_sec))
+    if (it == entries_.end())
+      continue;
+    // Only return entries pushed AFTER the client's known position
+    if (it->second.pushed_at <= since_pos)
+      continue;
+    if (max_age_sec >= 0 && now - it->second.timestamp >= static_cast<uint32_t>(max_age_sec))
       continue;
     delta.values[addr] = it->second.value;
   }

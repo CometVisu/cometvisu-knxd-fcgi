@@ -15,11 +15,12 @@
 
 /**
  * @file group_cache.h
- * @brief KNX group telegram cache with age tracking.
+ * @brief KNX group telegram cache with per-entry position and age tracking.
  *
- * Stores latest value and timestamp (Unix epoch seconds) per group address.
- * A monotonically increasing position counter advances on each push().
- * Age filtering via max_age_sec rejects entries older than the threshold.
+ * Each push stores the value, a Unix epoch timestamp (for age filtering),
+ * and the cache position at push time.  get_delta() returns only entries
+ * whose push position is strictly greater than since_pos — guaranteeing
+ * no duplicate delivery and no stale re-transmission of unchanged GAs.
  */
 
 #ifndef COMETVISU_KNXD_FCGI_GROUP_CACHE_H_
@@ -40,30 +41,31 @@ class GroupCache {
 public:
   GroupCache() = default;
 
+  /// Push a value.  Records current position and timestamp.
   void push(uint16_t addr, const std::vector<uint8_t>& value);
 
-  /// @param max_age_sec If >= 0, reject entries older than this (seconds).
+  /// Get latest value for an address, optionally age-filtered.
   [[nodiscard]] std::optional<std::vector<uint8_t>> get(uint16_t addr,
                                                         int max_age_sec = -1) const;
 
-  /// Check for new data since @p since_pos for @p subscribed addresses.
+  /// Entries newer than since_pos for subscribed addresses.
   struct Delta {
     std::unordered_map<uint16_t, std::vector<uint8_t>> values;
     uint32_t position = 0;
   };
+  /// Only entries with pushed_at > since_pos are returned.
   [[nodiscard]] Delta get_delta(uint32_t since_pos,
                                 const std::set<uint16_t>& subscribed,
                                 int max_age_sec = -1) const;
 
-  /// Authoritative position (= number of pushes).  Lock-free.
   [[nodiscard]] uint32_t position() const { return position_.load(); }
-
   void clear();
 
 private:
   struct Entry {
     std::vector<uint8_t> value;
-    uint32_t timestamp;  // Unix epoch seconds
+    uint32_t timestamp;   // Unix epoch seconds — for age filtering
+    uint32_t pushed_at;   // cache position when pushed — for delta queries
   };
 
   mutable std::mutex mutex_;
