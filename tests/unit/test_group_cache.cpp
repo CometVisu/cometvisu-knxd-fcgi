@@ -14,7 +14,9 @@
 // along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
 #include <gtest/gtest.h>
+
 #include <thread>
+
 #include "state/group_cache.h"
 
 using namespace cvknxd;
@@ -175,7 +177,8 @@ TEST_F(GroupCacheTest, DeltaKeepsFreshChangedEntryWhenOtherIsStale) {
 // ================================================================
 
 TEST_F(GroupCacheTest, PositionMonotonic) {
-  for (int i = 0; i < 1000; ++i) cache_.push(0x0A03, {static_cast<uint8_t>(i)});
+  for (int i = 0; i < 1000; ++i)
+    cache_.push(0x0A03, {static_cast<uint8_t>(i)});
   EXPECT_EQ(cache_.position(), 1000);
 }
 
@@ -191,7 +194,8 @@ TEST_F(GroupCacheTest, ConcurrentPushAndGetDelta) {
 
   // Writer thread: pushes 100 values
   std::thread writer([&]() {
-    while (!start.load()) {}
+    while (!start.load()) {
+    }
     for (int i = 0; i < 100; ++i) {
       cache_.push(0x0A03, {static_cast<uint8_t>(i)});
       pushes_done.store(i + 1);
@@ -200,7 +204,11 @@ TEST_F(GroupCacheTest, ConcurrentPushAndGetDelta) {
 
   // Reader thread: polls with get_delta, must always see forward progress
   std::thread reader([&]() {
-    while (!start.load()) {}
+    while (!start.load()) {
+    }
+    // Wait until the writer has pushed at least one value
+    while (pushes_done.load() == 0) {
+    }
     uint32_t last_pos = 0;
     int reads = 0;
     while (pushes_done.load() < 100 && reads < 500) {
@@ -210,7 +218,8 @@ TEST_F(GroupCacheTest, ConcurrentPushAndGetDelta) {
       if (!d.values.empty()) {
         ASSERT_GT(d.position, last_pos) << "non-empty delta must advance position";
       }
-      if (d.position > last_pos) last_pos = d.position;
+      if (d.position > last_pos)
+        last_pos = d.position;
       reads++;
     }
     // Must have seen forward progress
@@ -228,7 +237,8 @@ TEST_F(GroupCacheTest, ConcurrentMultipleWriters) {
   std::set<uint16_t> addrs = {0x0A03, 0x0B04, 0x0C05};
 
   auto writer = [&](uint16_t addr) {
-    while (!start.load()) {}
+    while (!start.load()) {
+    }
     for (int i = 0; i < kPerThread; ++i)
       cache_.push(addr, {static_cast<uint8_t>(i)});
   };
@@ -238,7 +248,9 @@ TEST_F(GroupCacheTest, ConcurrentMultipleWriters) {
   std::thread w3(writer, 0x0C05);
 
   start.store(true);
-  w1.join(); w2.join(); w3.join();
+  w1.join();
+  w2.join();
+  w3.join();
 
   // All addresses should have their latest value
   EXPECT_EQ(cache_.position(), kPerThread * 3);
