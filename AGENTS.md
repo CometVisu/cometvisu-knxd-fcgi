@@ -86,7 +86,7 @@ actual file content (e.g., `#pragma once` or `#include`).
 | `src/router/`    | URL routing and handler dispatch             |
 | `src/handlers/`  | `/l`, `/r`, `/w` endpoint handlers           |
 | `src/knxd/`      | knxd Unix socket client and eibd protocol    |
-| `src/state/`     | Session store, address cache                  |
+| `src/state/`     | Session store, shared & local group caches    |
 | `src/util/`      | Query string parser, JSON builder, hex utils |
 | `tests/unit/`    | Unit tests (mocked dependencies)             |
 | `tests/integration/` | Integration tests (real or fake socket)  |
@@ -109,19 +109,38 @@ actual file content (e.g., `#pragma once` or `#include`).
    `clone3`/`clone` with process-sharing flags (CLONE_VM, CLONE_THREAD) is
    blocked, preventing `std::thread` creation.
 
-2. **Knxd connection is persistent**: Each worker process opens its own
-   Unix socket connection to knxd at startup. Each process opens a "Group
-   Socket" (not a T_Group tunnel per address) for listening to group telegrams.
-   Access to each connection is serialized via mutex for thread safety.
+2. **Knxd connections**:
+   - **Cache reader process**: A single dedicated child process opens a
+     read-write group socket to knxd.  It continuously drains group telegrams
+     (APDU_PACKET and GROUP_PACKET) and pushes them into the shared cache.
+   - **Worker processes**: Each worker opens a **write-only** group socket
+     (`open_group_socket(true)`) to knxd.  Workers only send group telegrams
+     (via `/w` handler) — all group telegram reception goes through the cache
+     reader.  This ensures only one knxd connection reads from the bus,
+     eliminating duplicate processing and per-worker position divergence.
 
-3. **Address cache**: Maintains a `std::unordered_map<group_addr, CacheEntry>`
-   where `CacheEntry` has `value`, `last_updated` timestamp.
+3. **Shared-memory group cache (`SharedGroupCache`)**: A fixed-size
+   open-addressing hash table (2048 entries) in `mmap(MAP_SHARED|MAP_ANONYMOUS)`
+   memory, accessible by all worker processes.  Each entry stores the KNX group
+   address, APDU value data (up to 14 bytes), a Unix timestamp, and the
+   `pushed_at` position.  Synchronization:
+   - `pthread_mutex_t` with `PTHREAD_PROCESS_SHARED` and `PTHREAD_MUTEX_ROBUST`
+     protects all read/write access to cache entries.
+   - `pthread_cond_t` with `PTHREAD_PROCESS_SHARED` and `CLOCK_MONOTONIC`
+     enables zero-CPU blocking for long-poll readers.
+   - `std::atomic<uint32_t> position` — lock-free reads, monotonically
+     increasing across all workers.  The single source of truth for the `i`
+     field in `/r` responses.
+   - `std::atomic<uint32_t> generation` — incremented on each push, used by
+     `wait_for_new_data()` for efficient change detection.
 
-4. **Long-poll**: For `/r` requests without timeout, the handler enters a
-   `poll()`-based wait loop on the knxd socket file descriptor. The kernel puts
-   the process to sleep until data arrives or the configurable timeout expires,
-   burning zero CPU. Incoming telegrams update the cache via the telegram
-   callback and matching requests wake immediately.
+4. **Long-poll**: For `/r` requests, the ReadHandler blocks on the shared
+   condition variable via `pthread_cond_timedwait()` instead of polling a knxd
+   socket fd.  When the cache reader pushes new data, it broadcasts the
+   condition variable — all blocked workers wake immediately (microsecond
+   latency) and call `get_delta()` to find matching entries.  Zero CPU while
+   waiting.  The `wait_for_new_data()` method handles spurious wakeups and
+   robust-mutex recovery (EOWNERDEAD).
 
 5. **KNX semantic correctness rules** — these are non-negotiable constraints
    that every handler implementation MUST satisfy:
@@ -133,28 +152,35 @@ actual file content (e.g., `#pragma once` or `#include`).
    triggers the scene twice, a "step" dimming command steps twice.  The
    handler must use `already_written` deduplication within a single response
    AND must never return data with a stale position (`i`) that would cause
-   knxd to re-report the same telegram on the next poll.
+   re-reporting of the same telegram on the next poll.
 
-   **Rule 2 — Immediate delivery**: Group telegrams (APDU_PACKET) arriving
-   on the group socket carry the actual data and must be processed without
-   delay.  The handler must not wait for a cache round-trip before delivering
-   group-socket data.  The combined poll in `cache_last_updates_2` ensures
-   group data wakes the handler immediately.
+   **Rule 2 — Immediate delivery**: Group telegrams arriving on the knxd
+   group socket must be processed without delay.  The cache reader process
+   pushes them to the shared cache and broadcasts the condition variable
+   immediately.  Blocked long-poll readers wake and query `get_delta()`
+   with zero additional latency.
 
    **Rule 3 — Authoritative index**: The `i` value in every response must
-   come from knxd via `cache_last_updates_2` (`new_position`).  The handler
-   must never fabricate, locally infer, or increment the position.  If the
-   authoritative position cannot be obtained (e.g. `cache_last_updates_2`
-   returns nullopt or `new_position <= lastpos`), the handler must retry
-   the position query.  If the position still cannot be confirmed, the
-   handler must NOT deliver data — it must return an empty response and
-   let the next poll (with correct position) deliver the data via cache.
+   come from the shared cache's `position` counter.  This counter is
+   `std::atomic<uint32_t>`, incremented atomically on each push, and shared
+   across all worker processes via `mmap`.  The handler must never fabricate,
+   locally infer, or manipulate the position.  The shared counter guarantees
+   monotonicity — `i` never goes backward, preventing duplicate delivery
+   across worker boundaries.
 
 6. **No external JSON library**: The JSON responses are simple enough to build
    with a minimal, purpose-built `JsonBuilder`.
 
 7. **No external HTTP parser**: FastCGI provides parsed `QUERY_STRING` via
    `FCGI_PARAMS`. We parse the query string ourselves with `QueryString`.
+
+8. **Cache reader process**: A dedicated child process (forked before the
+   worker pool) that owns the single knxd group socket connection.  It runs
+   a `poll()`-based loop: wait for activity on the knxd fd, drain all pending
+   group telegrams, parse APDU data, and push value data to the shared cache.
+   Each push increments the shared position counter and broadcasts the
+   condition variable to wake blocked long-poll readers.  The cache reader
+   handles knxd reconnection transparently via `connect_knxd_with_retry()`.
 
 ## Knxd Protocol Details
 
@@ -177,9 +203,6 @@ The eibd client protocol over Unix socket:
 | `EIB_OPEN_GROUPCON`     | `0x0026` | Open group socket connection   |
 | `EIB_GROUP_PACKET`      | `0x0027` | Send group telegram            |
 | `EIB_APDU_PACKET`       | `0x0025` | Received group telegram        |
-| `EIB_OPEN_T_GROUP`      | `0x0022` | Open T_Group (for read)        |
-| `EIB_CACHE_READ`        | `0x0074` | Read from group cache          |
-| `EIB_CACHE_READ_NOWAIT` | `0x0075` | Read from group cache (no wait)|
 
 ### Group Address Format
 KNX three-level address `X/Y/Z` → 16-bit:
@@ -217,12 +240,12 @@ Response: empty success or error message.
 Note: The destination group address (dst_ga) is at offset 2-3 of the payload
 (after the 2-byte type), NOT at offset 0-1 (which is the source physical address).
 
-### Cache Read Response (EIB_CACHE_READ / EIB_CACHE_READ_NOWAIT)
+knxd also echoes injected telegrams back as GROUP_PACKET messages:
 ```
-[type:2] [src:2] [dst:2] [apdu_data...]
+[0x00 0x27] [src_pa_hi] [src_pa_lo] [dst_ga_hi] [dst_ga_lo] [APDU bytes...]
 ```
-- Cache hit: payload size >= 6 (src + dst + at least 2 APDU bytes)
-- Cache miss: payload size == 4 (src + dst only, no APDU data)
+Both message types are handled identically by the cache reader — the
+payload structure is the same (src_pa + dst_ga + apdu).
 
 ## APDU Decoding
 
@@ -244,14 +267,21 @@ KNX data values are transmitted as hex strings in CometVisu JSON:
 
 ## Test Mocking Strategy
 
-For unit tests of knxd-dependent components, use dependency injection:
-- `KnxdClient` has a virtual `send()` / `recv()` that can be mocked.
-- Or use a real Unix socket pair in tests with a mock server responding.
+For unit tests of the shared cache, use `SharedGroupCache::create()` which
+allocates a real mmap'd region — this works fine in single-process tests.
+For multi-instance tests (simulating multiple workers), use `attach()` to
+share the same underlying `SharedCacheData` pointer.
 
-For integration tests, use:
-- A real knxd instance if available.
-- A fake socket server (`mocks/mock_knxd_socket.h`) that speaks enough of the
-  eibd protocol to satisfy test scenarios.
+For integration tests of the ReadHandler, push test data directly to the
+shared cache via `cache_.push()` before calling `handle()`.  For poll-loop
+tests that need deferred data arrival, use a separate thread that calls
+`cache_.push()` after a short delay while the handler is blocked in
+`wait_for_new_data()`.
+
+For knxd-dependent tests, the `MockKnxdClient` in `mocks/mock_knxd_socket.h`
+provides a fake implementation.  It is used by write-handler tests and
+connection tests, but is no longer needed by ReadHandler tests (the ReadHandler
+uses the shared cache directly, not the knxd socket).
 
 ## Reference: Existing CometVisu Backend Implementations
 
