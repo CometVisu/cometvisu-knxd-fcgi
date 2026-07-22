@@ -82,7 +82,7 @@ TEST_F(ReadHandlerTest, NoValidAddressesReturns404) {
 // ================================================================
 
 TEST_F(ReadHandlerTest, InitialReadFromGroupCache) {
-  cache_.update(0x0A03, {0x42});  // 1/2/3
+  cache_.push(0x0A03, {0x42});  // 1/2/3
   ReadHandler handler(knxd_, cache_, sessions_);
   auto r = handler.handle("a=1/2/3&t=30");
   EXPECT_EQ(r.http_status, 200);
@@ -100,8 +100,8 @@ TEST_F(ReadHandlerTest, InitialReadCacheMissReturnsEmpty) {
 }
 
 TEST_F(ReadHandlerTest, InitialReadMultipleAddresses) {
-  cache_.update(0x0A03, {0x42});        // 1/2/3
-  cache_.update(0x0B04, {0x0C, 0x6F});  // 1/3/4
+  cache_.push(0x0A03, {0x42});        // 1/2/3
+  cache_.push(0x0B04, {0x0C, 0x6F});  // 1/3/4
   ReadHandler handler(knxd_, cache_, sessions_);
   auto r = handler.handle("a=1/2/3&a=1/3/4&t=30");
   EXPECT_EQ(r.http_status, 200);
@@ -112,7 +112,7 @@ TEST_F(ReadHandlerTest, InitialReadMultipleAddresses) {
 }
 
 TEST_F(ReadHandlerTest, InitialReadMixedCachedAndUncached) {
-  cache_.update(0x0A03, {0x42});  // only 1/2/3 cached
+  cache_.push(0x0A03, {0x42});  // only 1/2/3 cached
   ReadHandler handler(knxd_, cache_, sessions_);
   auto r = handler.handle("a=1/2/3&a=1/3/4&t=0");
   EXPECT_EQ(r.http_status, 200);
@@ -122,8 +122,8 @@ TEST_F(ReadHandlerTest, InitialReadMixedCachedAndUncached) {
 }
 
 TEST_F(ReadHandlerTest, TZeroForcesInitialRead) {
-  cache_.update(0x0A03, {0x42});
-  cache_.update(0x0B04, {0x0C, 0x6F});
+  cache_.push(0x0A03, {0x42});
+  cache_.push(0x0B04, {0x0C, 0x6F});
   ReadHandler handler(knxd_, cache_, sessions_);
   auto r = handler.handle("a=1/2/3&a=1/3/4&t=0");
   EXPECT_EQ(r.http_status, 200);
@@ -182,19 +182,21 @@ TEST_F(ReadHandlerTest, LongPollTimeoutReturnsEmpty) {
 TEST_F(ReadHandlerTest, WriteWakesBlockedRead) {
   ReadHandler handler(knxd_, cache_, sessions_);
   knxd_.enqueue_telegram(0x0A03, {0x00, 0x80, 0x42});
-  auto r = handler.handle("a=1/2/3&i=42&t=5");
+  auto r = handler.handle("a=1/2/3&i=0&t=5");
   EXPECT_EQ(r.http_status, 200);
   EXPECT_NE(r.body.find("1/2/3"), std::string::npos);
   EXPECT_NE(r.body.find("42"), std::string::npos);
+  // i = cache position after push
   EXPECT_NE(r.body.find("\"i\":1"), std::string::npos);
 }
 
 TEST_F(ReadHandlerTest, WriteWakesBlockedReadNonMatchingIgnored) {
   ReadHandler handler(knxd_, cache_, sessions_);
   knxd_.enqueue_telegram(0x0B04, {0x00, 0x80, 0x0C, 0x6F});
-  auto r = handler.handle("a=1/2/3&i=42&t=5");
+  auto r = handler.handle("a=1/2/3&i=0&t=5");
   EXPECT_EQ(r.body.find("1/3/4"), std::string::npos);
   EXPECT_NE(r.body.find("\"d\":{}"), std::string::npos);
+  // no data delivered → i stays at request_i
   EXPECT_NE(r.body.find("\"i\":1"), std::string::npos);
 }
 
@@ -202,8 +204,9 @@ TEST_F(ReadHandlerTest, WriteWakesReadIndexAdvances) {
   ReadHandler handler(knxd_, cache_, sessions_);
   knxd_.enqueue_telegram(0x0A03, {0x00, 0x80, 0x42});
   knxd_.enqueue_telegram(0x0A03, {0x00, 0x80, 0x99});
-  auto r = handler.handle("a=1/2/3&i=42&t=5");
+  auto r = handler.handle("a=1/2/3&i=0&t=5");
   EXPECT_NE(r.body.find("99"), std::string::npos);
+  // same address deduplicated → 1 delivery → i = cache position after 2 pushes
   EXPECT_NE(r.body.find("\"i\":2"), std::string::npos);
 }
 
@@ -211,13 +214,13 @@ TEST_F(ReadHandlerTest, WriteWakesReadIndexAdvances) {
 // Position (i) correctness
 // ================================================================
 
-TEST_F(ReadHandlerTest, IndexIsTelegramCount) {
+TEST_F(ReadHandlerTest, IndexAdvancesPerUniqueAddress) {
   knxd_.enqueue_telegram(0x0A03, {0x00, 0x80, 0x42});
-  knxd_.enqueue_telegram(0x0A03, {0x00, 0x80, 0x99});
-  knxd_.enqueue_telegram(0x0B04, {0x00, 0x80, 0x01});
+  knxd_.enqueue_telegram(0x0B04, {0x00, 0x80, 0x0C, 0x6F});
   ReadHandler handler(knxd_, cache_, sessions_);
-  auto r = handler.handle("a=1/2/3&t=5");
-  EXPECT_NE(r.body.find("\"i\":3"), std::string::npos);
+  auto r = handler.handle("a=1/2/3&a=1/3/4&t=5");
+  // 2 unique addresses → i = 0 + 2 = 2
+  EXPECT_NE(r.body.find("\"i\":2"), std::string::npos);
 }
 
 TEST_F(ReadHandlerTest, IndexNeverGoesBackward) {

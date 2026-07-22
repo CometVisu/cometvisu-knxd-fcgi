@@ -15,25 +15,22 @@
 
 /**
  * @file group_cache.h
- * @brief Local cache for KNX group telegrams.
+ * @brief KNX group telegram cache with age tracking.
  *
- * Mirrors the approach of the reference eibread-cgi: maintains a local
- * cache of group address values, updated from APDU_PACKET telegrams
- * received on the group socket.  This avoids round-trips to knxd's
- * built-in cache (cache_read) for every value lookup, and provides
- * immediate availability of values written via /w — the group socket
- * echo updates this cache before knxd's cache_last_updates_2 position
- * is confirmed.
- *
- * Thread-safe: all public methods are protected by a mutex.
+ * Stores latest value and timestamp (Unix epoch seconds) per group address.
+ * A monotonically increasing position counter advances on each push().
+ * Age filtering via max_age_sec rejects entries older than the threshold.
  */
 
 #ifndef COMETVISU_KNXD_FCGI_GROUP_CACHE_H_
 #define COMETVISU_KNXD_FCGI_GROUP_CACHE_H_
 
+#include <atomic>
 #include <cstdint>
+#include <ctime>
 #include <mutex>
 #include <optional>
+#include <set>
 #include <unordered_map>
 #include <vector>
 
@@ -43,30 +40,36 @@ class GroupCache {
 public:
   GroupCache() = default;
 
-  /// @brief Update (or insert) the cached value for a KNX group address.
-  /// @param addr 16-bit EIB group address.
-  /// @param value Raw APDU value bytes (without APCI header).
-  void update(uint16_t addr, std::vector<uint8_t> value);
+  void push(uint16_t addr, const std::vector<uint8_t>& value);
 
-  /// @brief Get the cached value for a KNX group address.
-  /// @param addr 16-bit EIB group address.
-  /// @return The cached value bytes, or std::nullopt if not cached.
-  [[nodiscard]] std::optional<std::vector<uint8_t>> get(uint16_t addr) const;
+  /// @param max_age_sec If >= 0, reject entries older than this (seconds).
+  [[nodiscard]] std::optional<std::vector<uint8_t>> get(uint16_t addr,
+                                                        int max_age_sec = -1) const;
 
-  /// @brief Remove all cached entries.
+  /// Check for new data since @p since_pos for @p subscribed addresses.
+  struct Delta {
+    std::unordered_map<uint16_t, std::vector<uint8_t>> values;
+    uint32_t position = 0;
+  };
+  [[nodiscard]] Delta get_delta(uint32_t since_pos,
+                                const std::set<uint16_t>& subscribed,
+                                int max_age_sec = -1) const;
+
+  /// Authoritative position (= number of pushes).  Lock-free.
+  [[nodiscard]] uint32_t position() const { return position_.load(); }
+
   void clear();
 
-  /// @brief Number of cached entries.
-  [[nodiscard]] size_t size() const;
-
-  /// @brief Check if the cache contains an entry for an address.
-  [[nodiscard]] bool contains(uint16_t addr) const;
-
 private:
+  struct Entry {
+    std::vector<uint8_t> value;
+    uint32_t timestamp;  // Unix epoch seconds
+  };
+
   mutable std::mutex mutex_;
-  std::unordered_map<uint16_t, std::vector<uint8_t>> entries_;
+  std::unordered_map<uint16_t, Entry> entries_;
+  std::atomic<uint32_t> position_{0};
 };
 
 }  // namespace cvknxd
-
-#endif  // COMETVISU_KNXD_FCGI_GROUP_CACHE_H_
+#endif

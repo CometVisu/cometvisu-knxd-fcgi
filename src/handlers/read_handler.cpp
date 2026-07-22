@@ -15,15 +15,12 @@
 
 /**
  * @file read_handler.cpp
- * @brief Implementation of the CometVisu /r (read) endpoint handler.
+ * @brief CometVisu /r endpoint — ring-cache based, zero knxd-cache dependency.
  *
- * Like the reference eibread-cgi.c, maintains a local GroupCache updated
- * from APDU_PACKET telegrams on the group socket.  This avoids all knxd
- * cache round-trips — data comes from GroupCache, position (`i`) from
- * the group telegram counter.  cache_last_updates_2 is not used.
- *
- * The poll loop blocks via wait_for_activity() on the group socket fd,
- * burning zero CPU because the kernel puts the process to sleep.
+ * Group telegrams are drained from the group socket, pushed into a
+ * ring-buffer GroupCache, and delivered to clients with the cache's
+ * authoritative position as `i`.  No cache_last_updates_2, no cache_read,
+ * no manual position manipulation — the cache is the single source of truth.
  */
 
 #include "read_handler.h"
@@ -58,21 +55,16 @@ std::optional<int> ReadHandler::parse_timeout(std::string_view t_str) {
   if (t_str.empty())
     return std::nullopt;
   int val = 0;
-  // NOLINTNEXTLINE(cppcoreguidelines-pro-bounds-pointer-arithmetic)
   const auto [ptr, ec] = std::from_chars(t_str.data(), t_str.data() + t_str.size(), val);
   if (ec != std::errc{})
     return std::nullopt;
-  // NOLINTNEXTLINE(cppcoreguidelines-pro-bounds-pointer-arithmetic)
   if (ptr != t_str.data() + t_str.size())
     return std::nullopt;
   return val;
 }
 
-/// Drain all pending group telegrams: parse APDU, update GroupCache,
-/// and collect hex-encoded values for subscribed addresses.
-static void drain_and_cache(KnxdClientInterface& knxd, GroupCache& cache,
-                            const std::set<uint16_t>& eib_addrs,
-                            std::unordered_map<uint16_t, std::string>& out_matches) {
+/// Drain group telegrams from the socket, push each into the ring cache.
+static void drain_into_cache(KnxdClientInterface& knxd, GroupCache& cache) {
   uint16_t addr = 0;
   std::vector<uint8_t> apdu;
   while (knxd.poll_group_telegram(addr, apdu)) {
@@ -80,10 +72,7 @@ static void drain_and_cache(KnxdClientInterface& knxd, GroupCache& cache,
     std::vector<uint8_t> value_data;
     if (!parse_apdu(apdu, apdu_type, value_data) || apdu_type == ApduType::Read)
       continue;
-    cache.update(addr, value_data);
-    if (eib_addrs.contains(addr)) {
-      out_matches[addr] = hex_encode(value_data.data(), value_data.size());
-    }
+    cache.push(addr, value_data);
   }
 }
 
@@ -149,25 +138,26 @@ ReadResult ReadHandler::handle(std::string_view query_string) {
   json.start_object();
   json.add_key("d");
   json.start_object();
-  bool written = false;
   std::set<uint16_t> already_written;
 
-  // ---- Initial read from GroupCache (lastpos == 0) ----
+  // ---- Initial read: get latest values from ring cache ----
   if (lastpos == 0) {
     for (auto addr : eib_addrs) {
-      auto cached = cache_.get(addr);
+      auto cached = cache_.get(addr, timeout_sec);
       if (cached) {
         json.add_string(addr_key(addr), hex_encode(cached->data(), cached->size()));
         already_written.insert(addr);
-        written = true;
       }
     }
+    // Use cache position as i (may be 0 if cache is empty)
+    lastpos = cache_.position();
   }
 
-  // ---- Poll loop — wait_for_activity, drain, deliver ----
+  // ---- Poll loop — wait, drain, query cache delta ----
   auto tstart = std::chrono::steady_clock::now();
+  bool written = !already_written.empty();
 
-  while ((!written || lastpos < 1) && timeout_sec > 0) {
+  while (timeout_sec > 0) {
     const auto elapsed =
         std::chrono::duration_cast<std::chrono::seconds>(std::chrono::steady_clock::now() - tstart)
             .count();
@@ -175,27 +165,27 @@ ReadResult ReadHandler::handle(std::string_view query_string) {
     if (remaining <= 0)
       break;
 
-    // Block on both the group socket and cache connection.  Either waking
-    // indicates activity (a group telegram or cache update).  Zero CPU.
     auto activity = knxd_.wait_for_activity(remaining * 1000);
     if (activity == KnxdClientInterface::WaitResult::Timeout)
       break;
 
-    // Drain group telegrams into GroupCache, collect matches.
-    std::unordered_map<uint16_t, std::string> matches;
-    drain_and_cache(knxd_, cache_, eib_addrs, matches);
+    // Drain all pending telegrams into the ring cache
+    drain_into_cache(knxd_, cache_);
 
-    for (const auto& [addr, hex_val] : matches) {
+    // Query cache for new entries since our last known position
+    auto delta = cache_.get_delta(lastpos, eib_addrs, timeout_sec);
+
+    // Deliver matching entries
+    for (const auto& [addr, val] : delta.values) {
       if (!already_written.contains(addr)) {
-        json.add_string(addr_key(addr), hex_val);
+        json.add_string(addr_key(addr), hex_encode(val.data(), val.size()));
         already_written.insert(addr);
         written = true;
       }
     }
 
-    // Position: group-telegram counter, monotonically increasing.
-    // Every APDU_PACKET advances it — no duplicate i values possible.
-    lastpos = static_cast<uint32_t>(knxd_.get_telegram_count());
+    // Position comes from the cache — authoritative, never manipulated
+    lastpos = delta.position;
 
     if (written)
       break;

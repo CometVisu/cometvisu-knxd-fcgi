@@ -71,7 +71,7 @@ TEST_F(FullFlowTest, WriteThenRead) {
   EXPECT_EQ(write_result.http_status, 200);
 
   // Step 2: Populate GroupCache (simulating group telegram echo from knxd)
-  cache_.update(0x0A03, {0x0C, 0x6F});
+  cache_.push(0x0A03, {0x0C, 0x6F});
 
   // Step 3: Read from knxd's cache
   auto read_result = read_handler.handle("a=KNX:1/2/3&t=30");
@@ -97,7 +97,7 @@ TEST_F(FullFlowTest, RouterLoginRoute) {
 TEST_F(FullFlowTest, RouterReadRoute) {
   Router router(knxd_, cache_, sessions_);
 
-  cache_.update(0x0A03, {0x42});
+  cache_.push(0x0A03, {0x42});
 
   FcgiRequest req;
   req.request_method = "GET";
@@ -152,7 +152,7 @@ TEST_F(FullFlowTest, LoginResponseStructure) {
 
 TEST_F(FullFlowTest, ReadResponseStructure) {
   ReadHandler handler(knxd_, cache_, sessions_);
-  cache_.update(0x0A03, {0x42});
+  cache_.push(0x0A03, {0x42});
 
   auto result = handler.handle("a=KNX:1/2/3&t=30");
 
@@ -167,7 +167,7 @@ TEST_F(FullFlowTest, KnxdCacheIsUsedForReads) {
   // knxd's built-in cache stores values after writes or received telegrams.
   // Our code queries knxd's cache via cache_read() instead of a local cache.
   std::vector<uint8_t> data = {0x0C, 0x6F};
-  cache_.update(0x0A03, data);
+  cache_.push(0x0A03, data);
 
   ReadHandler handler(knxd_, cache_, sessions_);
   auto result = handler.handle("a=KNX:1/2/3&t=30");
