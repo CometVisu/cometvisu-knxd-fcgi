@@ -81,7 +81,15 @@ ReadResult ReadHandler::handle(std::string_view query_string) {
       return result;
     }
   }
+  // ---- Parse t= parameter (poll timeout AND age filter) ----
+  // Per spec (https://github.com/CometVisu/CometVisu/wiki/Protokoll):
+  //   t not provided → long-poll, no age filter
+  //   t = 0         → read from bus (we approximate: force initial cache read)
+  //   t > 0         → cached data ≤ t seconds old, then poll for t seconds
+  //   t < 0         → cache only, no bus read (no poll, no age filter)
   int timeout_sec = longpoll_timeout_sec_;
+  bool t_provided = false;
+  int t_original = 0;
   if (auto t_opt = params.get("t")) {
     const auto parsed = parse_timeout(*t_opt);
     if (!parsed) {
@@ -89,8 +97,17 @@ ReadResult ReadHandler::handle(std::string_view query_string) {
       result.body = R"({"error":"invalid timeout"})";
       return result;
     }
+    t_provided = true;
+    t_original = *parsed;
     timeout_sec = *parsed;
   }
+
+  // Age filter: only active when t > 0 (spec: "maximal TIMEOUT Sekunden alt").
+  int max_age_sec = -1;  // -1 = no age filter
+  if (t_provided && t_original > 0) {
+    max_age_sec = t_original;
+  }
+
   uint32_t lastpos = 0;
   if (auto i_opt = params.get("i")) {
     const auto parsed = parse_timeout(*i_opt);
@@ -98,9 +115,15 @@ ReadResult ReadHandler::handle(std::string_view query_string) {
       lastpos = static_cast<uint32_t>(*parsed);
     }
   }
-  if (timeout_sec == 0) {
+
+  // t=0: force initial read (spec: "versucht das Backend die Daten zu lesen").
+  // t<0: force initial read + no poll (spec: "nur aus dem Cache gelesen").
+  if (t_provided && t_original == 0) {
     lastpos = 0;
-    timeout_sec = 1;
+    timeout_sec = 1;  // short poll for immediate return after initial read
+  } else if (t_provided && t_original < 0) {
+    lastpos = 0;
+    timeout_sec = 0;  // no poll — return immediately
   }
 
   // ---- Build EIB address set ----
@@ -130,9 +153,14 @@ ReadResult ReadHandler::handle(std::string_view query_string) {
   std::set<uint16_t> already_written;
 
   // ---- Initial read: latest values from shared cache ----
+  // max_age_sec follows the spec:
+  //   t not provided → -1 (no age filter, long-poll initial read)
+  //   t = 0         → -1 (no age filter, "read from bus")
+  //   t > 0         → t  (spec: "maximal TIMEOUT Sekunden alt")
+  //   t < 0         → -1 (no age filter, "nur aus dem Cache")
   if (lastpos == 0) {
     for (auto addr : eib_addrs) {
-      auto cached = cache_.get(addr, timeout_sec);
+      auto cached = cache_.get(addr, max_age_sec);
       if (cached) {
         json.add_string(addr_key(addr), hex_encode(cached->data(), cached->size()));
         already_written.insert(addr);
@@ -167,7 +195,11 @@ ReadResult ReadHandler::handle(std::string_view query_string) {
     }
 
     // Query cache for entries newer than the client's last-known position.
-    auto delta = cache_.get_delta(lastpos, eib_addrs, timeout_sec);
+    // max_age_sec follows the spec:
+    //   t > 0 → entries ≤ t seconds old; t=0/t<0/no-t → no age filter.
+    // The position-based filter (pushed_at > lastpos) guarantees we only
+    // return new data.  Age filtering is an additional constraint per spec.
+    auto delta = cache_.get_delta(lastpos, eib_addrs, max_age_sec);
 
     for (const auto& [addr, val] : delta.values) {
       if (!already_written.contains(addr)) {

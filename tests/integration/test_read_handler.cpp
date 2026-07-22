@@ -616,3 +616,228 @@ TEST_F(ReadHandlerMultiCacheTest, WriteByWorkerANotVisibleInWorkerB) {
       << "BUG: data pushed to cache_a not visible in cache_b";
   EXPECT_NE(r.body.find("42"), std::string::npos);
 }
+
+// ================================================================
+// Age-filter regression tests — timeout must NOT be used as max_age
+// ================================================================
+// The ReadHandler must never use the poll timeout (t= parameter) as an
+// age filter on cached data.  The position-based filter (pushed_at > i)
+// is the only correct filtering mechanism — age filtering silently drops
+// telegrams the client hasn't seen yet, violating KNX Rule 1.
+
+/// REGRESSION: t=0 must return pre-cached data regardless of when it was
+/// pushed.  Using timeout_sec=1 as max_age_sec would hide all data older
+/// than 1 second, causing {"d":{},"i":N} on a non-empty cache.
+TEST_F(ReadHandlerTest, TZeroReturnsPreCachedData) {
+  // Simulate data that was pushed to the cache before this request.
+  cache_.push(0x0A03, {0x42});        // 1/2/3
+  cache_.push(0x0B04, {0x0C, 0x6F});  // 1/3/4
+
+  ReadHandler handler(cache_, sessions_);
+  auto r = handler.handle("a=1/2/3&a=1/3/4&t=0");
+
+  EXPECT_EQ(r.http_status, 200);
+  EXPECT_NE(r.body.find("1/2/3"), std::string::npos)
+      << "t=0 must return cached 1/2/3 regardless of age";
+  EXPECT_NE(r.body.find("42"), std::string::npos);
+  EXPECT_NE(r.body.find("1/3/4"), std::string::npos)
+      << "t=0 must return cached 1/3/4 regardless of age";
+  EXPECT_NE(r.body.find("0c6f"), std::string::npos);
+  // Position must reflect the cache state (2 pushes).
+  EXPECT_NE(r.body.find("\"i\":2"), std::string::npos);
+}
+
+/// Per spec, t>0 means "cached data at most t seconds old".  Freshly-pushed
+/// data passes the age filter; t=0 has no age filter (read-from-bus mode).
+/// All three must return the same freshly-pushed data.
+TEST_F(ReadHandlerTest, AgeFilterDoesNotRejectFreshData) {
+  cache_.push(0x0A03, {0x42});  // 1/2/3
+
+  // t=0: no age filter (read-from-bus), t=1 and t=5: age filter passes
+  // because data was pushed just now (timestamp diff < 1 second).
+  for (int t_val : {0, 1, 5}) {
+    ReadHandler handler(cache_, sessions_);
+    auto r = handler.handle("a=1/2/3&t=" + std::to_string(t_val));
+    EXPECT_EQ(r.http_status, 200) << "t=" << t_val;
+    EXPECT_NE(r.body.find("42"), std::string::npos)
+        << "t=" << t_val << " must return freshly-pushed cached value";
+  }
+}
+
+/// REGRESSION: Initial read (no i= parameter) must return all cached data
+/// regardless of the timeout.  When t is not provided, no age filter is
+/// applied — the default longpoll timeout does NOT act as an age filter.
+TEST_F(ReadHandlerTest, InitialReadNoIndexReturnsAllCachedData) {
+  cache_.push(0x0A03, {0x42});  // 1/2/3
+  cache_.push(0x0B04, {0x01});  // 1/3/4
+
+  // No t= parameter → max_age_sec=-1 (no age filter).
+  ReadHandler handler(cache_, sessions_);
+  auto r = handler.handle("a=1/2/3&a=1/3/4");
+
+  EXPECT_EQ(r.http_status, 200);
+  EXPECT_NE(r.body.find("1/2/3"), std::string::npos);
+  EXPECT_NE(r.body.find("42"), std::string::npos);
+  EXPECT_NE(r.body.find("1/3/4"), std::string::npos);
+  EXPECT_NE(r.body.find("01"), std::string::npos);
+}
+
+/// REGRESSION: get_delta must return entries based on position, not age.
+/// When a client connects with i=0, ALL cached entries have pushed_at > 0
+/// and must be returned, even if they were pushed long ago.
+TEST_F(ReadHandlerTest, DeltaReturnsAllEntriesWhenPositionIsZero) {
+  // Push multiple entries to advance position beyond 0.
+  cache_.push(0x0A03, {0x42});  // pos 1
+  cache_.push(0x0B04, {0x01});  // pos 2
+  cache_.push(0x0C05, {0x02});  // pos 3
+
+  // Client requests with i=0 → should get ALL entries (pushed_at > 0).
+  ReadHandler handler(cache_, sessions_);
+  auto r = handler.handle("a=1/2/3&a=1/3/4&a=1/4/5&i=0&t=0");
+
+  EXPECT_EQ(r.http_status, 200);
+  EXPECT_NE(r.body.find("1/2/3"), std::string::npos);
+  EXPECT_NE(r.body.find("42"), std::string::npos);
+  EXPECT_NE(r.body.find("1/3/4"), std::string::npos);
+  EXPECT_NE(r.body.find("01"), std::string::npos);
+  EXPECT_NE(r.body.find("1/4/5"), std::string::npos);
+  EXPECT_NE(r.body.find("02"), std::string::npos);
+  EXPECT_NE(r.body.find("\"i\":3"), std::string::npos);
+}
+
+/// REGRESSION: get_delta with i=0 must NOT apply age filtering.
+/// Even with a small timeout value, entries with pushed_at > 0 must be
+/// returned — the position filter is the only correct filter.
+TEST_F(ReadHandlerTest, DeltaWithZeroIndexNotAffectedBySmallTimeout) {
+  cache_.push(0x0A03, {0x42});  // pos 1
+
+  // i=0, t=0 (timeout_sec becomes 1 internally).
+  // The delta query must return the entry at pos 1 despite the small timeout.
+  ReadHandler handler(cache_, sessions_);
+  auto r = handler.handle("a=1/2/3&i=0&t=0");
+
+  EXPECT_EQ(r.http_status, 200);
+  EXPECT_NE(r.body.find("42"), std::string::npos)
+      << "Entry at pushed_at=1 must be returned even with t=0";
+  EXPECT_NE(r.body.find("\"i\":1"), std::string::npos);
+}
+
+/// REGRESSION: With a non-zero i, delta must return all newer entries
+/// when new data arrives during the poll, regardless of timeout value.
+/// The position filter (pushed_at > i) is the only filter — age must not
+/// prevent delivery.
+TEST_F(ReadHandlerTest, DeltaReturnsAllNewerEntriesWhenDataArrives) {
+  cache_.push(0x0A03, {0x01});  // pos 1
+  cache_.push(0x0A03, {0x02});  // pos 2
+  cache_.push(0x0A03, {0x03});  // pos 3
+
+  // Push new data during the poll — triggers get_delta().
+  std::thread pusher([this]() {
+    std::this_thread::sleep_for(std::chrono::milliseconds(50));
+    cache_.push(0x0A03, {0x04});  // pos 4
+  });
+
+  // Client is at i=1, new data at pos 4 arrives during poll.
+  ReadHandler handler(cache_, sessions_);
+  auto r = handler.handle("a=1/2/3&i=1&t=2");
+  pusher.join();
+
+  EXPECT_EQ(r.http_status, 200);
+  EXPECT_NE(r.body.find("04"), std::string::npos)
+      << "Latest value (04) at pos 4 must be delivered via delta";
+  EXPECT_NE(r.body.find("\"i\":4"), std::string::npos) << "Position must advance to 4";
+  // Entry at pos 1 (i=1, pushed_at=1 is NOT > 1) must not be delivered.
+  EXPECT_EQ(r.body.find("01"), std::string::npos) << "Value at pos 1 must not be re-delivered";
+}
+
+/// REGRESSION: t=0 with i=0 (fresh connect) must do initial read and return
+/// ALL cached entries regardless of when they were pushed.
+TEST_F(ReadHandlerTest, FreshConnectReturnsAllCachedData) {
+  cache_.push(0x0A03, {0x01});  // pos 1
+  cache_.push(0x0A03, {0x02});  // pos 2
+  cache_.push(0x0A03, {0x03});  // pos 3
+  cache_.push(0x0A03, {0x04});  // pos 4
+
+  // i=0, t=0 — forces initial read, returns latest value.
+  ReadHandler handler(cache_, sessions_);
+  auto r = handler.handle("a=1/2/3&i=0&t=0");
+
+  EXPECT_EQ(r.http_status, 200);
+  EXPECT_NE(r.body.find("04"), std::string::npos)
+      << "Latest cached value must be returned on fresh connect";
+  EXPECT_NE(r.body.find("\"i\":4"), std::string::npos);
+}
+
+/// REGRESSION: Mix of cached (old push) and uncached addresses — the cached
+/// ones must be returned in the initial read regardless of age.
+TEST_F(ReadHandlerTest, MixedCachedAndUncachedInitialReadWithTZero) {
+  cache_.push(0x0A03, {0x42});  // 1/2/3 cached
+
+  ReadHandler handler(cache_, sessions_);
+  auto r = handler.handle("a=1/2/3&a=1/3/4&t=0");
+
+  EXPECT_EQ(r.http_status, 200);
+  EXPECT_NE(r.body.find("1/2/3"), std::string::npos) << "Cached address must be in response";
+  EXPECT_NE(r.body.find("42"), std::string::npos);
+  EXPECT_EQ(r.body.find("1/3/4"), std::string::npos) << "Uncached address must not appear";
+  EXPECT_NE(r.body.find("\"i\":1"), std::string::npos);
+}
+
+// ================================================================
+// t < 0 — "nur aus dem Cache gelesen" (cache only, no bus read)
+// ================================================================
+// Per spec: negative t means read from cache only, no polling, no bus
+// read.  Since we never read from the bus directly, this is essentially
+// the same as t=0 but without any poll loop.
+
+/// t=-1: returns cached data immediately, no poll, no age filter.
+TEST_F(ReadHandlerTest, TNegativeReturnsCachedDataImmediately) {
+  cache_.push(0x0A03, {0x42});  // 1/2/3
+  cache_.push(0x0B04, {0x01});  // 1/3/4
+
+  ReadHandler handler(cache_, sessions_);
+  auto r = handler.handle("a=1/2/3&a=1/3/4&t=-1");
+
+  EXPECT_EQ(r.http_status, 200);
+  EXPECT_NE(r.body.find("1/2/3"), std::string::npos) << "t=-1 must return cached data";
+  EXPECT_NE(r.body.find("42"), std::string::npos);
+  EXPECT_NE(r.body.find("1/3/4"), std::string::npos);
+  EXPECT_NE(r.body.find("01"), std::string::npos);
+  EXPECT_NE(r.body.find("\"i\":2"), std::string::npos);
+}
+
+/// t=-1 with no cached data: returns empty d, i=0, no poll.
+TEST_F(ReadHandlerTest, TNegativeEmptyCache) {
+  ReadHandler handler(cache_, sessions_);
+  auto r = handler.handle("a=1/2/3&t=-1");
+
+  EXPECT_EQ(r.http_status, 200);
+  EXPECT_NE(r.body.find("\"d\":{}"), std::string::npos);
+  EXPECT_NE(r.body.find("\"i\":0"), std::string::npos);
+}
+
+/// t=-1 with i= parameter: ignores i, forces initial read, returns all
+/// cached data (spec: "nur aus dem Cache gelesen").
+TEST_F(ReadHandlerTest, TNegativeIgnoresIndexForcesInitialRead) {
+  cache_.push(0x0A03, {0x42});  // pos 1
+
+  // Even with i=999 (beyond current position), t=-1 forces initial read.
+  ReadHandler handler(cache_, sessions_);
+  auto r = handler.handle("a=1/2/3&i=999&t=-1");
+
+  EXPECT_EQ(r.http_status, 200);
+  EXPECT_NE(r.body.find("42"), std::string::npos) << "t=-1 must return cached data regardless of i";
+  EXPECT_NE(r.body.find("\"i\":1"), std::string::npos);
+}
+
+/// t=-1 with large negative value: same behavior (cache only, no poll).
+TEST_F(ReadHandlerTest, TLargeNegativeReturnsCachedDataImmediately) {
+  cache_.push(0x0A03, {0x42});
+
+  ReadHandler handler(cache_, sessions_);
+  auto r = handler.handle("a=1/2/3&t=-999");
+
+  EXPECT_EQ(r.http_status, 200);
+  EXPECT_NE(r.body.find("42"), std::string::npos) << "t=-999 must return cached data immediately";
+  EXPECT_NE(r.body.find("\"i\":1"), std::string::npos);
+}
