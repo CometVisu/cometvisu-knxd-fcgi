@@ -401,21 +401,28 @@ TEST_F(ReadHandlerTest, DeltaOnlyReturnsNewerThanLastIndex) {
 }
 
 /// Unchanged address is NOT re-transmitted when another address changes.
+/// Uses a thread to simulate the cache reader pushing new data during the
+/// long-poll wait — the handler must only deliver entries with pushed_at > i.
 TEST_F(ReadHandlerTest, UnchangedAddressNotRetransmittedWhenOtherChanges) {
-  // This is the exact bug reproduction: A and B in cache, only B changes.
-  // A must NOT appear in the response.
+  // A and B in cache at known positions.
   cache_.push(0x0A03, {0x42});  // A at pos 1
   cache_.push(0x0B04, {0x01});  // B at pos 2
 
   ReadHandler handler(cache_, sessions_);
 
-  // Client has already seen position 1 (which includes A's value)
-  // Now knxd reports activity — but only B changed
-  cache_.push(0x0B04, {0x01});  // B again (same value, pos 3)
+  // Simulate the cache reader pushing B again while the handler is blocked
+  // in the poll loop.  The handler must only deliver B (pushed_at=3 > i=1),
+  // not A (pushed_at=1, not > 1).
+  std::thread pusher([this]() {
+    std::this_thread::sleep_for(std::chrono::milliseconds(50));
+    cache_.push(0x0B04, {0x01});  // B again (same value, pos 3)
+  });
 
-  // Client polls with i=1 — should ONLY get B (which changed at pos 2 and again at pos 3)
-  // A must NOT be returned because it hasn't changed since pos 1
-  auto r = handler.handle("a=1/2/3&a=1/3/4&i=1&t=0");
+  // Client polls with i=1 — should ONLY get B (changed at pos 2 and 3).
+  // Use t=5 so the thread has time to push.
+  auto r = handler.handle("a=1/2/3&a=1/3/4&i=1&t=5");
+  pusher.join();
+
   EXPECT_EQ(r.body.find("1/2/3"), std::string::npos) << "A must not be retransmitted";
   EXPECT_NE(r.body.find("1/3/4"), std::string::npos) << "B should be delivered";
 }
