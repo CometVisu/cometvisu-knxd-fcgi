@@ -80,10 +80,12 @@ GroupCache::Delta GroupCache::get_delta(uint32_t since_pos, const std::set<uint1
           (it->second.pushed_at - since_pos + kPositionModulus) % kPositionModulus;
       // An entry is newer if its distance is positive and within epoch_distance.
       // When since_pos=0 (new client), pushed_at=0 is valid first-push data.
-      if (entry_dist > epoch_distance)
+      if (entry_dist > epoch_distance) {
         continue;
-      if (since_pos != 0 && entry_dist == 0)
+      }
+      if (since_pos != 0 && entry_dist == 0) {
         continue;
+      }
       delta.values[addr] = it->second.value;
     }
   }

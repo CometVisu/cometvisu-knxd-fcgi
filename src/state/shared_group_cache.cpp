@@ -20,7 +20,6 @@
 
 #include <cerrno>
 #include <cstring>
-#include <new>
 
 namespace cvknxd {
 
@@ -172,10 +171,10 @@ std::optional<std::vector<uint8_t>> SharedGroupCache::get(uint16_t addr, int max
     if (max_age_sec >= 0) {
       auto now = static_cast<uint32_t>(std::time(nullptr));
       if (now - e.timestamp < static_cast<uint32_t>(max_age_sec)) {
-        result.emplace(e.value, e.value + e.value_len);
+        result.emplace(std::begin(e.value), std::next(std::begin(e.value), e.value_len));
       }
     } else {
-      result.emplace(e.value, e.value + e.value_len);
+      result.emplace(std::begin(e.value), std::next(std::begin(e.value), e.value_len));
     }
   }
 
@@ -231,17 +230,21 @@ SharedGroupCache::Delta SharedGroupCache::get_delta(uint32_t since_pos,
 
     if (epoch_mismatch) {
       // Full refresh: return all subscribed values regardless of pushed_at.
-      delta.values[addr] = std::vector<uint8_t>(e.value, e.value + e.value_len);
+      delta.values[addr] =
+          std::vector<uint8_t>(std::begin(e.value), std::next(std::begin(e.value), e.value_len));
     } else {
       // Normal delta: only include entries newer than since_pos (modular).
       uint32_t entry_dist = (e.pushed_at - since_pos + kPositionModulus) % kPositionModulus;
       // An entry is newer if its distance is positive and within epoch_distance.
       // When since_pos=0 (new client), pushed_at=0 is valid first-push data.
-      if (entry_dist > epoch_distance)
+      if (entry_dist > epoch_distance) {
         continue;
-      if (since_pos != 0 && entry_dist == 0)
+      }
+      if (since_pos != 0 && entry_dist == 0) {
         continue;
-      delta.values[addr] = std::vector<uint8_t>(e.value, e.value + e.value_len);
+      }
+      delta.values[addr] =
+          std::vector<uint8_t>(std::begin(e.value), std::next(std::begin(e.value), e.value_len));
     }
   }
 
@@ -277,7 +280,7 @@ bool SharedGroupCache::wait_for_new_data(int timeout_ms) {
   int64_t total_ns =
       static_cast<int64_t>(ts.tv_nsec) + static_cast<int64_t>(timeout_ms) * 1'000'000LL;
   ts.tv_sec += static_cast<time_t>(total_ns / 1'000'000'000LL);
-  ts.tv_nsec = static_cast<long>(total_ns % 1'000'000'000LL);
+  ts.tv_nsec = static_cast<decltype(ts.tv_nsec)>(total_ns % 1'000'000'000LL);
 
   // Wait loop: handles spurious wakeups.
   bool timed_out = false;
